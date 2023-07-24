@@ -1,6 +1,6 @@
 name = "VLF"
 uuid = "86670905-cf5e-428e-a540-2b4c7cb2fe26"
-authors = ["JamesMCannon"]
+authors = ["JamesMCannon", "1ryandick"]
 version = "1.0.0-DEV"
 
 [deps]
