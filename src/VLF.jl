@@ -91,10 +91,10 @@ function merge_data(data_times::Tuple,time_data::Tuple,un_wrap::Bool)
     copy_time = copy(data_times[1])
     day_data = Any[]
     date_data = Any[]
-    for i in 1:length(copy_start) #cycle through unique days
+    for i in 1:eachindex(copy_start) #cycle through unique days
         empty!(day_data) #clear current day data array
         empty!(date_data)#clear current day time array
-        for j in 1:length(duration) #cycle through unique days... should this be 'duration' instead?
+        for j in eachindex(duration) #cycle through unique days... should this be 'duration' instead?
             #if j > length(copy_data)
             #    break
             #end
