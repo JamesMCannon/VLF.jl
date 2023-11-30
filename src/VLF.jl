@@ -91,10 +91,10 @@ function merge_data(data_times::Tuple,time_data::Tuple,un_wrap::Bool)
     copy_time = copy(data_times[1])
     day_data = Any[]
     date_data = Any[]
-    for i in 1:length(copy_start) #cycle through unique days
+    for i in eachindex(copy_start) #cycle through unique days
         empty!(day_data) #clear current day data array
         empty!(date_data)#clear current day time array
-        for j in 1:length(duration) #cycle through unique days... should this be 'duration' instead?
+        for j in eachindex(duration) #cycle through unique days... should this be 'duration' instead?
             #if j > length(copy_data)
             #    break
             #end
@@ -172,7 +172,7 @@ function plot_data(axis_data1::Tuple, line_labels, xlabel1, plot_title)
     tick_positions = range(0, stop=n-1, length=n)
     cbar.set_ticks(tick_positions)
     cbar.set_ticklabels(line_labels)
-
+   
     show()
 end
 
@@ -182,10 +182,12 @@ function unwrap(phase::Vector{Any})
 
     for i = 2:length(phase)
         diff = phase[i] - phase[i - 1]
-        if diff > 180
+        if diff > 180 #if jump goes from neg to pos
             phase[i] = phase[i] - 360 * ceil((diff - 180) / 360)
-        elseif diff < -180
+            #phase[i] = -180 - (180-phase[i])
+        elseif diff < -180 #if jump goes from pos to neg
             phase[i] = phase[i] + 360 * ceil((-diff - 180) / 360)
+            #phase[i] = 180 - (-180-phase[i])
         else
             phase[i] = phase[i]
         end
