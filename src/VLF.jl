@@ -36,45 +36,49 @@ module VLF
     end
 
     function read_data(files::Vector,first_date::String,last_date::String) #Get all information needed form each data file, push into array of arrays
-		    start_year = Vector{Float64}()
-		    start_month = Vector{Float64}()
-		    start_day = Vector{Float64}()
-		    start_hour = Vector{Float64}()
-		    start_minute = Vector{Float64}()
-		    start_second = Vector{Float64}()
-		    data = Any[]
-		    Fs = Vector{Float64}()
-		    for i in eachindex(files)
-			    if Dates.value(Date(read(files[i],"start_year")[1],read(files[i],"start_month")[1],read(files[i],"start_day")[1])) >= Dates.value(Date(first_date)) && Dates.value(Date(read(files[i],"start_year")[1],read(files[i],"start_month")[1],read(files[i],"start_day")[1])) <= Dates.value(Date(last_date))
+		start_year = Vector{Float64}()
+		start_month = Vector{Float64}()
+        start_day = Vector{Float64}()
+        start_hour = Vector{Float64}()
+        start_minute = Vector{Float64}()
+        start_second = Vector{Float64}()
+        data = Any[]
+        Fs = Vector{Float64}()
+        for i in eachindex(files)
+            try 
+                if Dates.value(Date(read(files[i],"start_year")[1],read(files[i],"start_month")[1],read(files[i],"start_day")[1])) >= Dates.value(Date(first_date)) && Dates.value(Date(read(files[i],"start_year")[1],read(files[i],"start_month")[1],read(files[i],"start_day")[1])) <= Dates.value(Date(last_date))
 
-			        #Need the [1] behind each "read" function because "read" returns an array instead of an Int64
+                    #Need the [1] behind each "read" function because "read" returns an array instead of an Int64
 				
-				      append!(start_day, read(files[i],"start_day"))
-				      append!(start_minute, read(files[i],"start_minute"))
-				      append!(start_hour, read(files[i],"start_hour"))
-				      append!(start_second, read(files[i],"start_second"))
-				      append!(start_month, read(files[i],"start_month"))
-				      append!(start_year, read(files[i],"start_year"))
-				      push!(data, read(files[i],"data"))
-				      append!(Fs, read(files[i],"Fs"))
-			    end
-		    end
-		    return start_year,start_month,start_day,start_hour,start_minute,start_second,data,Fs
-	  end
+                    append!(start_day, read(files[i],"start_day"))
+                    append!(start_minute, read(files[i],"start_minute"))
+                    append!(start_hour, read(files[i],"start_hour"))
+                    append!(start_second, read(files[i],"start_second"))
+                    append!(start_month, read(files[i],"start_month"))
+                    append!(start_year, read(files[i],"start_year"))
+                    push!(data, read(files[i],"data"))
+                    append!(Fs, read(files[i],"Fs"))
+                end
+            catch x
+                println("Unable to read file: ",files[i])
+            end
+        end
+        return start_year,start_month,start_day,start_hour,start_minute,start_second,data,Fs
+	end
 
     function start_time(time_data::Tuple)
-		    times = Any[]
-		    date_times = []
-		    for i in 1:length(time_data[3])
-			    push!(times, collect(Dates.value.(Time(time_data[4][i],time_data[5][i],time_data[6][i]))/1e9:1/time_data[8][i]:Dates.value.(Time(time_data[4][i],time_data[5][i],time_data[6][i])+Dates.Millisecond(length(time_data[7][i])*1000/time_data[8][i]-1))/1e9)/3600)
+        times = Any[]
+        date_times = []
+        for i in 1:length(time_data[3])
+            push!(times, collect(Dates.value.(Time(time_data[4][i],time_data[5][i],time_data[6][i]))/1e9:1/time_data[8][i]:Dates.value.(Time(time_data[4][i],time_data[5][i],time_data[6][i])+Dates.Millisecond(length(time_data[7][i])*1000/time_data[8][i]-1))/1e9)/3600)
 
-			    #for times, the increments are in milliseconds. We multiply the length of the data array by 1000/frequency to trick the dataset into thinking it is being sampled at 1Hz (This gives us the correct time duration for the data set). The time array has steps of 1/Frequency so there are enough "data points" every second.
+            #for times, the increments are in milliseconds. We multiply the length of the data array by 1000/frequency to trick the dataset into thinking it is being sampled at 1Hz (This gives us the correct time duration for the data set). The time array has steps of 1/Frequency so there are enough "data points" every second.
 			
-			    push!(date_times, Dates.value(Date(time_data[1][i],time_data[2][i],time_data[3][i]))) 
-			    #Same date_times variable, nothing changed
-		    end
-		    return times,date_times
-	  end
+            push!(date_times, Dates.value(Date(time_data[1][i],time_data[2][i],time_data[3][i]))) 
+            #Same date_times variable, nothing changed
+        end
+        return times,date_times
+    end
 
     function merge_data(data_times::Tuple,time_data::Tuple,un_wrap::Bool) 
         #Collect each day of data into their own array, then push array of full day of data into final_data. 
@@ -100,26 +104,26 @@ module VLF
                     append!(day_data, copy_data[j])
                     append!(date_data, copy_time[j])
                 end
-                if length(day_data) > 0
-                    if un_wrap == true
-                        copy_day_data = deepcopy(day_data)
-                        copy_date_data = deepcopy(date_data)
-                        push!(final_time, copy_date_data)
-                        push!(final_data, unwrap(copy_day_data))
-                        push!(years, year(copy_start[i]))
-                        push!(months, month(copy_start[i]))
-                        #push!(years, time_data[1][i])
-                        #push!(months, time_data[2][i])
-                    else
-                        copy_day_data = deepcopy(day_data)
-                        copy_date_data = deepcopy(date_data)
-                        push!(final_time, copy_date_data)
-                        push!(final_data, copy_day_data)
-                        push!(years, year(copy_start[i]))
-                        push!(months, month(copy_start[i]))
-                        #push!(years, time_data[1][i])
-                        #push!(months, time_data[2][i])
-                    end
+            end
+            if length(day_data) > 0
+                if un_wrap == true
+                    copy_day_data = deepcopy(day_data)
+                    copy_date_data = deepcopy(date_data)
+                    push!(final_time, copy_date_data)
+                    push!(final_data, unwrap(copy_day_data))
+                    push!(years, year(copy_start[i]))
+                    push!(months, month(copy_start[i]))
+                    #push!(years, time_data[1][i])
+                    #push!(months, time_data[2][i])
+                else
+                    copy_day_data = deepcopy(day_data)
+                    copy_date_data = deepcopy(date_data)
+                    push!(final_time, copy_date_data)
+                    push!(final_data, copy_day_data)
+                    push!(years, year(copy_start[i]))
+                    push!(months, month(copy_start[i]))
+                    #push!(years, time_data[1][i])
+                    #push!(months, time_data[2][i])
                 end
             end
         end
@@ -178,11 +182,11 @@ module VLF
 
 			#Same principal as the cmap index, but the ending tick of the colorbar corresponds to how many data points are represented by the colorbar. So, multiply by (n-1) so the index goes from 0 to (# of days plotted) instead of 0 to 1.
 			    if line_labels[1][i] != ""
-				      append!(tick_positions, ((Dates.value(line_labels[1][i])-base) / (endpoint-base))*(n-1))
-				      push!(final_line_labels, line_labels[1][i])
-	       		  ax.plot(axis_data1[2][i], axis_data1[1][i], color=line_color, 				label=line_labels[1][i], linewidth=0.5)
+                    append!(tick_positions, ((Dates.value(line_labels[1][i])-base) / (endpoint-base))*(n-1))
+                    push!(final_line_labels, line_labels[1][i])
+                    ax.plot(axis_data1[2][i], axis_data1[1][i], color=line_color, 				label=line_labels[1][i], linewidth=0.5)
 			    else
-				      ax.plot(axis_data1[2][i],axis_data1[1][i], color=line_color, label="", linewidth=0.5)
+                    ax.plot(axis_data1[2][i],axis_data1[1][i], color=line_color, label="", linewidth=0.5)
 			    end
 	    end
 	    ax.grid(true)
@@ -192,10 +196,10 @@ module VLF
 	    sm.set_array([])
 	    cbar = fig.colorbar(sm, ax=ax)
 	    cbar.set_label("Date")
-		  xticks(0:4:24)
-		  ylabel(xlabel1)
-		  xlabel("Time (Hrs)")
-		  title(plot_title)
+            xticks(0:4:24)
+		    ylabel(xlabel1)
+		    xlabel("Time (Hrs)")
+		    title(plot_title)
 	
 	    #set custom tick labels on the colorbar
 	    cbar.set_ticks(tick_positions)
@@ -225,9 +229,3 @@ function unwrap(phase::Vector{Any})
 end
     
 end
-b=read_multiple_mat_files("C:\\Users\\1ryan\\OneDrive - UCB-O365\\ARL Data","NLK_NS_B")
-time_data2 = read_data(b,"2023-04-01","2023-07-17")
-data_times2 = start_time(time_data2)
-merged_data2 = merge_data(data_times2,time_data2,true)
-line_label2 = label_maker(merged_data2,time_data2,5)
-plot_data(merged_data2, line_label2, "Phase Shift","ARL")
