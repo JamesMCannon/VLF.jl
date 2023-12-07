@@ -14,6 +14,7 @@ module VLF
     export plot_data
     export unwrap
     export calibrate_NB
+    export combine_2ch
 
     function read_multiple_mat_files(folder_path::AbstractString, include_pattern::AbstractString)
         mat_files = filter(f -> isfile(joinpath(folder_path, f)), readdir(folder_path))
@@ -181,6 +182,28 @@ module VLF
         end
         return final_data,final_time,years,months
     end
+
+    function combine_2ch(cal_data1::Tuple, cal_data2::Tuple)
+        #=
+            cal_data1: calibrated channel 1 data of the 2 channels to be combined
+            cal_data2: calibrated channel 2 data of the 2 channels to be combined
+        
+            This function adds in quadrature 2 channels of calibrated data together
+        
+            authors: James M Cannon
+            date of last modification: 12/07/23
+        =#
+        
+           Combined_Data = deepcopy(cal_data1)
+           #copy the timing data contained in the rest of the data tuple to preserve when the tuple is returned
+        
+           for i = 1:length(cal_data1[1])
+            Combined_Data[1][i] = sqrt.(cal_data1[1][i].^2 .+ cal_data2[1][i].^2)
+            #add in quadrature (c = sqrt(a^2+b^2))
+           end
+           return Combined_Data
+        
+        end
 
     function label_maker(merged_data::Tuple,time_data::Tuple,number)
         line_labels = []
