@@ -13,6 +13,7 @@ module VLF
     export label_maker
     export plot_data
     export unwrap
+    export calibrate_NB
 
     function read_multiple_mat_files(folder_path::AbstractString, include_pattern::AbstractString)
         mat_files = filter(f -> isfile(joinpath(folder_path, f)), readdir(folder_path))
@@ -28,6 +29,7 @@ module VLF
                 if include_file
                     mat_contents = matopen(file_path)
                     push!(data, mat_contents)
+                    close(file_path)
                 end
             end
         end
@@ -44,6 +46,8 @@ module VLF
         start_second = Vector{Float64}()
         data = Any[]
         Fs = Vector{Float64}()
+        Fc = Vector{Float64}()
+        adc_channel_number = Vector{Float64}()
         for i in eachindex(files)
             try 
                 if Dates.value(Date(read(files[i],"start_year")[1],read(files[i],"start_month")[1],read(files[i],"start_day")[1])) >= Dates.value(Date(first_date)) && Dates.value(Date(read(files[i],"start_year")[1],read(files[i],"start_month")[1],read(files[i],"start_day")[1])) <= Dates.value(Date(last_date))
@@ -58,13 +62,58 @@ module VLF
                     append!(start_year, read(files[i],"start_year"))
                     push!(data, read(files[i],"data"))
                     append!(Fs, read(files[i],"Fs"))
+                    append!(Fc, read(files[i],"Fc"))
+                    append!(adc_channel_number, read(files[i],"adc_channel_number"))
                 end
             catch x
                 println("Unable to read file: ",files[i])
             end
         end
-        return start_year,start_month,start_day,start_hour,start_minute,start_second,data,Fs
+        return start_year,start_month,start_day,start_hour,start_minute,start_second,data,Fs,Fc,adc_channel_number
 	end
+
+    function calibrate_NB(raw_data::Tuple, cal_file::String)
+        #=  
+            raw_data: Narrowband data returned by the read_data() fcn. Expected to be a tuple with 10 dimensions 
+            cal_file: the path to the relevant calibration file for the receiver who's data is contained in raw_data
+
+            calibrate_NB calibrates the Narrowband data contained in raw_data using the frequency response contained in cal_file
+
+            authors: James M Cannon
+            date of last modification: 12/07/23
+        =#
+        mat_contents = matopen(cal_file)
+        cal_structure = raw_data #copy the raw data structure to not lose timing information on return
+    
+        for i = 1:length(raw_data[1])
+            adc_channel_number = raw_data[10][i] #identify the channel number from the data file which specifies ns/ew
+            Fc = raw_data[9][i] #center frequency of the transmitter tracked
+    
+            if adc_channel_number == 0 #0 => NS, 1=> EW
+                cal_curve = read(mat_contents,"CalibrationNumberNS")
+            elseif adc_channel_number == 1
+                cal_curve = read(mat_contents,"CalibrationNumberEW")
+            else
+                println("Unexpected Channel Number: ", adc_channel_number)
+            end
+    
+            freqs = abs.(cal_curve[:,1])
+            response = abs.(cal_curve[:,2])
+    
+            Fc_idx = findmin(abs.(freqs.*1000 .-Fc))[2] #find the index of the entry closest to the transmitter frequency used in the data
+    
+            cal_factor = response[Fc_idx]
+            #CalibrationNumber, contained in response[], is a coefficient to convert from DAQ counts to pT
+            calibrated_data = raw_data[7][i] .* cal_factor
+    
+            cal_structure[7][i] = calibrated_data
+            #replace the uncalibrated data in cal_structure[7][] with the calibrated data
+        end
+        
+        close(cal_file)
+        return cal_structure
+    
+    end
 
     function start_time(time_data::Tuple)
         times = Any[]
