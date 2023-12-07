@@ -38,7 +38,7 @@ module VLF
         return data
     end
 
-    function read_data(files::Vector,first_date::String,last_date::String) #Get all information needed form each data file, push into array of arrays
+    function read_data(files::Vector,first_date::String="2000-01-01",last_date::String="2500-01-01") #Get all information needed form each data file, push into array of arrays
 		start_year = Vector{Float64}()
 		start_month = Vector{Float64}()
         start_day = Vector{Float64}()
