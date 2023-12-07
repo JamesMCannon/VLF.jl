@@ -64,6 +64,8 @@ module VLF
                     append!(Fs, read(files[i],"Fs"))
                     append!(Fc, read(files[i],"Fc"))
                     append!(adc_channel_number, read(files[i],"adc_channel_number"))
+
+                    close(files[i])
                 end
             catch x
                 println("Unable to read file: ",files[i])
@@ -83,7 +85,7 @@ module VLF
             date of last modification: 12/07/23
         =#
         mat_contents = matopen(cal_file)
-        cal_structure = raw_data #copy the raw data structure to not lose timing information on return
+        cal_structure = deepcopy(raw_data) #copy the raw data structure to not lose timing information on return
     
         for i = 1:length(raw_data[1])
             adc_channel_number = raw_data[10][i] #identify the channel number from the data file which specifies ns/ew
@@ -108,8 +110,9 @@ module VLF
     
             cal_structure[7][i] = calibrated_data
             #replace the uncalibrated data in cal_structure[7][] with the calibrated data
+            
         end
-        
+        close(mat_contents)
         close(cal_file)
         return cal_structure
     
