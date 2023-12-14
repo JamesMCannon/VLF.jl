@@ -15,6 +15,7 @@ module VLF
     export unwrap
     export calibrate_NB
     export combine_2ch
+    export plot_day
 
     function read_multiple_mat_files(folder_path::AbstractString, include_pattern::AbstractString)
         mat_files = filter(f -> isfile(joinpath(folder_path, f)), readdir(folder_path))
@@ -241,9 +242,9 @@ module VLF
         return final_line_labels,line_labels
     end
 
-    function plot_data(axis_data1::Tuple, line_labels::Tuple, xlabel1, plot_title)
+    function plot_data(axis_data1::Tuple, line_labels::Tuple, xlabel1, plot_title, xlim_fcn=[0 24], xticks_fcn=(0:4:24))
 	    n = length(axis_data1[1])
-		  base = Dates.value(line_labels[2][1]) #full value of first day
+        base = Dates.value(line_labels[2][1]) #full value of first day
 	    endpoint = Dates.value(last(line_labels[2])) #full value of last day
 	
 	    fig, ax = subplots()
@@ -271,11 +272,12 @@ module VLF
 	    sm.set_array([])
 	    cbar = fig.colorbar(sm, ax=ax)
 	    cbar.set_label("Date")
-            xticks(0:4:24)
-		    ylabel(xlabel1)
-		    xlabel("Time (Hrs)")
-		    title(plot_title)
-	
+        xticks(xticks_fcn)
+        #xticks(0:1:24)
+        ylabel(xlabel1)
+        xlabel("Time (Hrs)")
+        title(plot_title)
+        xlim(xlim_fcn)
 	    #set custom tick labels on the colorbar
 	    cbar.set_ticks(tick_positions)
 	    cbar.set_ticklabels(final_line_labels)
@@ -283,24 +285,53 @@ module VLF
 	    show()
 	end
 
-function unwrap(phase::Vector{Any})
-    unwrapped_phase = copy(phase)
-    unwrapped_phase[1] = phase[1]
+    function plot_day(axis_data_fcn::Vector,title_fcn, ylabel_fcn; xlabel_fcn="Time (Hrs)", xlim_fcn = [0, 24], xticks_fcn = (0:4:24),line_label="", color="#3CA0FA")
+        #=
+            axis_data_fcn: vector of [1][:] data and [2][:] timestamps
+            title_fcn: desired title of the plot
+            ylabel_fcn: desired y-label of the plot
+            xlabel_fcn desired x-label of the plot (default of "Time (Hrs)")
+            xlim_fcn: desired x-limits for the plot (default of [0,24])
+            xticks_fcn: desired x-tick marks (default of every 4 between 0 and 24)
+            line_label: desired label for line (default of "")
+            color: desired line color (default of #3CA0FA (custom blue))
 
-    for i in 2:length(phase) #eachindex() doesn't work here and I don't know why
-        diff = phase[i] - phase[i - 1]
-        if diff > 180 #if jump goes from neg to pos
-            phase[i] = phase[i] - 360 * ceil((diff - 180) / 360)
-            #phase[i] = -180 - (180-phase[i])
-        elseif diff < -180 #if jump goes from pos to neg
-            phase[i] = phase[i] + 360 * ceil((-diff - 180) / 360)
-            #phase[i] = 180 - (-180-phase[i])
-        else
-            phase[i] = phase[i]
-        end
+        
+            This function plots a single day of narrowband data
+        
+            authors: James M Cannon
+            date of last modification: 12/14/23
+        =#
+
+
+        plot(axis_data_fcn[2][:],axis_data_fcn[1][:],color=color, label=line_label,linewidth=0.5)
+        grid(true)
+        xticks(xticks_fcn)
+        ylabel(ylabel_fcn)
+        xlabel(xlabel_fcn)
+        title(title_fcn)
+        xlim(xlim_fcn)
+        show()
     end
 
-    return phase
-end
+    function unwrap(phase::Vector{Any})
+        unwrapped_phase = copy(phase)
+        unwrapped_phase[1] = phase[1]
+
+        for i in 2:length(phase) #eachindex() doesn't work here and I don't know why
+            diff = phase[i] - phase[i - 1]
+            if diff > 180 #if jump goes from neg to pos
+                phase[i] = phase[i] - 360 * ceil((diff - 180) / 360)
+                #phase[i] = -180 - (180-phase[i])
+            elseif diff < -180 #if jump goes from pos to neg
+                phase[i] = phase[i] + 360 * ceil((-diff - 180) / 360)
+                #phase[i] = 180 - (-180-phase[i])
+            else
+                phase[i] = phase[i]
+            end
+        end
+
+        return phase
+    end
     
 end
