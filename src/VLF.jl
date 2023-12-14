@@ -4,6 +4,7 @@ module VLF
     using MAT
     using Dates
     using PyPlot
+    using Parameters
 
     #Export all function names
     export read_multiple_mat_files
@@ -86,6 +87,7 @@ module VLF
             authors: James M Cannon
             date of last modification: 12/07/23
         =#
+        
         mat_contents = matopen(cal_file)
         cal_structure = deepcopy(raw_data) #copy the raw data structure to not lose timing information on return
     
@@ -285,33 +287,51 @@ module VLF
 	    show()
 	end
 
-    function plot_day(axis_data_fcn::Vector,title_fcn, ylabel_fcn; xlabel_fcn="Time (Hrs)", xlim_fcn = [0, 24], xticks_fcn = (0:4:24),line_label="", color="#3CA0FA")
+    @with_kw struct Plot_Options
+        #=
+            xlabel: x-axis label 
+            ylabel: y-axis label
+            title: plot title
+            xlim: x-axis limits
+            xticks: x-axis tick marker locations
+            primary_color: primary color used in the plot
+            grid: which gridlines to show (minor, major, both)
+
+            This structure contains common plotting options to be reused by various plot functions
+
+            authors: James M Cannon
+            date of last modification: 12/14/23
+        =#
+
+        xlabel = "Time (Hrs)"
+        ylabel
+        title
+        xlim = [0, 24]
+        xticks = (0:4:24)
+        primary_color = "#3CA0FA"
+        grid = "both"
+    end
+
+    function plot_day(axis_data_fcn::Vector; line_label="",opts::Plot_Options)
         #=
             axis_data_fcn: vector of [1][:] data and [2][:] timestamps
-            title_fcn: desired title of the plot
-            ylabel_fcn: desired y-label of the plot
-            xlabel_fcn desired x-label of the plot (default of "Time (Hrs)")
-            xlim_fcn: desired x-limits for the plot (default of [0,24])
-            xticks_fcn: desired x-tick marks (default of every 4 between 0 and 24)
             line_label: desired label for line (default of "")
-            color: desired line color (default of #3CA0FA (custom blue))
+            opts: Plot_Options structure containing various options for modifying a plot
 
-        
             This function plots a single day of narrowband data
         
             authors: James M Cannon
             date of last modification: 12/14/23
         =#
 
-
-        plot(axis_data_fcn[2][:],axis_data_fcn[1][:],color=color, label=line_label,linewidth=0.5)
-        grid(true)
-        xticks(xticks_fcn)
-        ylabel(ylabel_fcn)
-        xlabel(xlabel_fcn)
-        title(title_fcn)
-        xlim(xlim_fcn)
-        show()
+        plt.plot(axis_data_fcn[2][:],axis_data_fcn[1][:],color=opts.primary_color, label=line_label,linewidth=0.5)
+        plt.grid(which = opts.grid)
+        plt.xticks(opts.xticks)
+        plt.ylabel(opts.ylabel)
+        plt.xlabel(opts.xlabel)
+        plt.title(opts.title)
+        plt.xlim(opts.xlim)
+        plt.show()
     end
 
     function unwrap(phase::Vector{Any})
