@@ -6,7 +6,7 @@ module VLF
     using PyPlot
     using Parameters
 
-    #Export all function names
+    #Export all function names; can use VLF.foo() for any function, exported or not
     export read_multiple_mat_files
     export read_data
     export start_time
@@ -17,6 +17,7 @@ module VLF
     export calibrate_NB
     export combine_2ch
     export plot_day
+    export plot_multi_site
 
     function read_multiple_mat_files(folder_path::AbstractString, include_pattern::AbstractString)
         mat_files = filter(f -> isfile(joinpath(folder_path, f)), readdir(folder_path))
@@ -331,6 +332,30 @@ module VLF
         plt.xlabel(opts.xlabel)
         plt.title(opts.title)
         plt.xlim(opts.xlim)
+        plt.show()
+    end
+
+    function plot_multi_site(axis_data_fcn::Vector; line_labels="",opts::Plot_Options)
+        #=
+            axis_data_fcn: vector of [n][1][:] data and [n][2][:] timestamps where n is the number of sites
+            line_labels: desired labels for each of n lines (default of "")
+            opts: Plot_Options structure containing various options for modifying a plot
+
+            This function plots a single day of narrowband data across multiple sites
+        
+            authors: James M Cannon
+            date of last modification: 12/15/23
+        =#
+        for i in axis_data_fcn
+            plt.plot(i[2][:],i[1][:],linewidth=0.5)
+        end
+        plt.grid(which = opts.grid)
+        plt.xticks(opts.xticks)
+        plt.ylabel(opts.ylabel)
+        plt.xlabel(opts.xlabel)
+        plt.title(opts.title)
+        plt.xlim(opts.xlim)
+        plt.legend(line_labels)
         plt.show()
     end
 
