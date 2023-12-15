@@ -4,8 +4,9 @@ module VLF
     using MAT
     using Dates
     using PyPlot
+    using Parameters
 
-    #Export all function names
+    #Export all function names; can use VLF.foo() for any function, exported or not
     export read_multiple_mat_files
     export read_data
     export start_time
@@ -13,6 +14,10 @@ module VLF
     export label_maker
     export plot_data
     export unwrap
+    export calibrate_NB
+    export combine_2ch
+    export plot_day
+    export plot_multi_site
 
     function read_multiple_mat_files(folder_path::AbstractString, include_pattern::AbstractString)
         mat_files = filter(f -> isfile(joinpath(folder_path, f)), readdir(folder_path))
@@ -28,6 +33,7 @@ module VLF
                 if include_file
                     mat_contents = matopen(file_path)
                     push!(data, mat_contents)
+                    close(file_path)
                 end
             end
         end
@@ -35,7 +41,7 @@ module VLF
         return data
     end
 
-    function read_data(files::Vector,first_date::String,last_date::String) #Get all information needed form each data file, push into array of arrays
+    function read_data(files::Vector,first_date::String="2000-01-01",last_date::String="2500-01-01") #Get all information needed form each data file, push into array of arrays
 		start_year = Vector{Float64}()
 		start_month = Vector{Float64}()
         start_day = Vector{Float64}()
@@ -44,6 +50,8 @@ module VLF
         start_second = Vector{Float64}()
         data = Any[]
         Fs = Vector{Float64}()
+        Fc = Vector{Float64}()
+        adc_channel_number = Vector{Float64}()
         for i in eachindex(files)
             try 
                 if Dates.value(Date(read(files[i],"start_year")[1],read(files[i],"start_month")[1],read(files[i],"start_day")[1])) >= Dates.value(Date(first_date)) && Dates.value(Date(read(files[i],"start_year")[1],read(files[i],"start_month")[1],read(files[i],"start_day")[1])) <= Dates.value(Date(last_date))
@@ -58,13 +66,62 @@ module VLF
                     append!(start_year, read(files[i],"start_year"))
                     push!(data, read(files[i],"data"))
                     append!(Fs, read(files[i],"Fs"))
+                    append!(Fc, read(files[i],"Fc"))
+                    append!(adc_channel_number, read(files[i],"adc_channel_number"))
+
+                    close(files[i])
                 end
             catch x
                 println("Unable to read file: ",files[i])
             end
         end
-        return start_year,start_month,start_day,start_hour,start_minute,start_second,data,Fs
+        return start_year,start_month,start_day,start_hour,start_minute,start_second,data,Fs,Fc,adc_channel_number
 	end
+
+    function calibrate_NB(raw_data::Tuple, cal_file::String)
+        #=  
+            raw_data: Narrowband data returned by the read_data() fcn. Expected to be a tuple with 10 dimensions 
+            cal_file: the path to the relevant calibration file for the receiver who's data is contained in raw_data
+
+            calibrate_NB calibrates the Narrowband data contained in raw_data using the frequency response contained in cal_file
+
+            authors: James M Cannon
+            date of last modification: 12/07/23
+        =#
+        
+        mat_contents = matopen(cal_file)
+        cal_structure = deepcopy(raw_data) #copy the raw data structure to not lose timing information on return
+    
+        for i = 1:length(raw_data[1])
+            adc_channel_number = raw_data[10][i] #identify the channel number from the data file which specifies ns/ew
+            Fc = raw_data[9][i] #center frequency of the transmitter tracked
+    
+            if adc_channel_number == 0 #0 => NS, 1=> EW
+                cal_curve = read(mat_contents,"CalibrationNumberNS")
+            elseif adc_channel_number == 1
+                cal_curve = read(mat_contents,"CalibrationNumberEW")
+            else
+                println("Unexpected Channel Number: ", adc_channel_number)
+            end
+    
+            freqs = abs.(cal_curve[:,1])
+            response = abs.(cal_curve[:,2])
+    
+            Fc_idx = findmin(abs.(freqs.*1000 .-Fc))[2] #find the index of the entry closest to the transmitter frequency used in the data
+    
+            cal_factor = response[Fc_idx]
+            #CalibrationNumber, contained in response[], is a coefficient to convert from DAQ counts to pT
+            calibrated_data = raw_data[7][i] .* cal_factor
+    
+            cal_structure[7][i] = calibrated_data
+            #replace the uncalibrated data in cal_structure[7][] with the calibrated data
+            
+        end
+        close(mat_contents)
+        close(cal_file)
+        return cal_structure
+    
+    end
 
     function start_time(time_data::Tuple)
         times = Any[]
@@ -130,6 +187,28 @@ module VLF
         return final_data,final_time,years,months
     end
 
+    function combine_2ch(cal_data1::Tuple, cal_data2::Tuple)
+        #=
+            cal_data1: calibrated channel 1 data of the 2 channels to be combined
+            cal_data2: calibrated channel 2 data of the 2 channels to be combined
+        
+            This function adds in quadrature 2 channels of calibrated data together
+        
+            authors: James M Cannon
+            date of last modification: 12/07/23
+        =#
+        
+           Combined_Data = deepcopy(cal_data1)
+           #copy the timing data contained in the rest of the data tuple to preserve when the tuple is returned
+        
+           for i = 1:length(cal_data1[1])
+            Combined_Data[1][i] = sqrt.(cal_data1[1][i].^2 .+ cal_data2[1][i].^2)
+            #add in quadrature (c = sqrt(a^2+b^2))
+           end
+           return Combined_Data
+        
+        end
+
     function label_maker(merged_data::Tuple,time_data::Tuple,number)
         line_labels = []
         unique_days = []
@@ -166,9 +245,9 @@ module VLF
         return final_line_labels,line_labels
     end
 
-    function plot_data(axis_data1::Tuple, line_labels::Tuple, xlabel1, plot_title)
+    function plot_data(axis_data1::Tuple, line_labels::Tuple, xlabel1, plot_title, xlim_fcn=[0 24], xticks_fcn=(0:4:24))
 	    n = length(axis_data1[1])
-		  base = Dates.value(line_labels[2][1]) #full value of first day
+        base = Dates.value(line_labels[2][1]) #full value of first day
 	    endpoint = Dates.value(last(line_labels[2])) #full value of last day
 	
 	    fig, ax = subplots()
@@ -196,11 +275,12 @@ module VLF
 	    sm.set_array([])
 	    cbar = fig.colorbar(sm, ax=ax)
 	    cbar.set_label("Date")
-            xticks(0:4:24)
-		    ylabel(xlabel1)
-		    xlabel("Time (Hrs)")
-		    title(plot_title)
-	
+        xticks(xticks_fcn)
+        #xticks(0:1:24)
+        ylabel(xlabel1)
+        xlabel("Time (Hrs)")
+        title(plot_title)
+        xlim(xlim_fcn)
 	    #set custom tick labels on the colorbar
 	    cbar.set_ticks(tick_positions)
 	    cbar.set_ticklabels(final_line_labels)
@@ -208,24 +288,95 @@ module VLF
 	    show()
 	end
 
-function unwrap(phase::Vector{Any})
-    unwrapped_phase = copy(phase)
-    unwrapped_phase[1] = phase[1]
+    @with_kw struct Plot_Options
+        #=
+            xlabel: x-axis label 
+            ylabel: y-axis label
+            title: plot title
+            xlim: x-axis limits
+            xticks: x-axis tick marker locations
+            primary_color: primary color used in the plot
+            grid: which gridlines to show (minor, major, both)
 
-    for i in 2:length(phase) #eachindex() doesn't work here and I don't know why
-        diff = phase[i] - phase[i - 1]
-        if diff > 180 #if jump goes from neg to pos
-            phase[i] = phase[i] - 360 * ceil((diff - 180) / 360)
-            #phase[i] = -180 - (180-phase[i])
-        elseif diff < -180 #if jump goes from pos to neg
-            phase[i] = phase[i] + 360 * ceil((-diff - 180) / 360)
-            #phase[i] = 180 - (-180-phase[i])
-        else
-            phase[i] = phase[i]
-        end
+            This structure contains common plotting options to be reused by various plot functions
+
+            authors: James M Cannon
+            date of last modification: 12/14/23
+        =#
+
+        xlabel = "Time (Hrs)"
+        ylabel
+        title
+        xlim = [0, 24]
+        xticks = (0:4:24)
+        primary_color = "#3CA0FA"
+        grid = "both"
     end
 
-    return phase
-end
+    function plot_day(axis_data_fcn::Vector; line_label="",opts::Plot_Options)
+        #=
+            axis_data_fcn: vector of [1][:] data and [2][:] timestamps
+            line_label: desired label for line (default of "")
+            opts: Plot_Options structure containing various options for modifying a plot
+
+            This function plots a single day of narrowband data
+        
+            authors: James M Cannon
+            date of last modification: 12/14/23
+        =#
+
+        plt.plot(axis_data_fcn[2][:],axis_data_fcn[1][:],color=opts.primary_color, label=line_label,linewidth=0.5)
+        plt.grid(which = opts.grid)
+        plt.xticks(opts.xticks)
+        plt.ylabel(opts.ylabel)
+        plt.xlabel(opts.xlabel)
+        plt.title(opts.title)
+        plt.xlim(opts.xlim)
+        plt.show()
+    end
+
+    function plot_multi_site(axis_data_fcn::Vector; line_labels="",opts::Plot_Options)
+        #=
+            axis_data_fcn: vector of [n][1][:] data and [n][2][:] timestamps where n is the number of sites
+            line_labels: desired labels for each of n lines (default of "")
+            opts: Plot_Options structure containing various options for modifying a plot
+
+            This function plots a single day of narrowband data across multiple sites
+        
+            authors: James M Cannon
+            date of last modification: 12/15/23
+        =#
+        for i in axis_data_fcn
+            plt.plot(i[2][:],i[1][:],linewidth=0.5)
+        end
+        plt.grid(which = opts.grid)
+        plt.xticks(opts.xticks)
+        plt.ylabel(opts.ylabel)
+        plt.xlabel(opts.xlabel)
+        plt.title(opts.title)
+        plt.xlim(opts.xlim)
+        plt.legend(line_labels)
+        plt.show()
+    end
+
+    function unwrap(phase::Vector{Any})
+        unwrapped_phase = copy(phase)
+        unwrapped_phase[1] = phase[1]
+
+        for i in 2:length(phase) #eachindex() doesn't work here and I don't know why
+            diff = phase[i] - phase[i - 1]
+            if diff > 180 #if jump goes from neg to pos
+                phase[i] = phase[i] - 360 * ceil((diff - 180) / 360)
+                #phase[i] = -180 - (180-phase[i])
+            elseif diff < -180 #if jump goes from pos to neg
+                phase[i] = phase[i] + 360 * ceil((-diff - 180) / 360)
+                #phase[i] = 180 - (-180-phase[i])
+            else
+                phase[i] = phase[i]
+            end
+        end
+
+        return phase
+    end
     
 end
