@@ -78,30 +78,33 @@ module VLF
         return start_year,start_month,start_day,start_hour,start_minute,start_second,data,Fs,Fc,adc_channel_number
 	end
 
-    function calibrate_NB(raw_data::Tuple, cal_file::String)
+    function calibrate_NB(raw_data::Tuple; cal_file::String="default",cal_num::Float64=-1.0)
         #=  
             raw_data: Narrowband data returned by the read_data() fcn. Expected to be a tuple with 10 dimensions 
-            cal_file: the path to the relevant calibration file for the receiver who's data is contained in raw_data
+            cal_file: the path to the relevant calibration file for the receiver who's data is contained in raw_data - if applicable
+            cal_num: The cal_num coefficient for the receiver channel corresponding to the data in raw_data
 
-            calibrate_NB calibrates the Narrowband data contained in raw_data using the frequency response contained in cal_file
+            calibrate_NB calibrates the Narrowband data contained in raw_data using the frequency response contained in cal_file or specified in cal_num
 
             authors: James M Cannon
-            date of last modification: 12/07/23
+            date of last modification: 02/09/24
         =#
-        
-        mat_contents = matopen(cal_file)
+
         cal_structure = deepcopy(raw_data) #copy the raw data structure to not lose timing information on return
-    
-        for i = 1:length(raw_data[1])
-            adc_channel_number = raw_data[10][i] #identify the channel number from the data file which specifies ns/ew
-            Fc = raw_data[9][i] #center frequency of the transmitter tracked
-    
+
+        if cal_file=="default" && cal_num!=-1.0
+            #use cal_num
+            cal_factor = cal_num
+        elseif cal_num==-1.0 && cal_file!="default"
+            mat_contents = matopen(cal_file)
+            adc_channel_number = raw_data[10][1] #identify the channel number from the data file which specifies ns/ew
+            Fc = raw_data[9][1] #center frequency of the transmitter tracked
             if adc_channel_number == 0 #0 => NS, 1=> EW
                 cal_curve = read(mat_contents,"CalibrationNumberNS")
             elseif adc_channel_number == 1
-                cal_curve = read(mat_contents,"CalibrationNumberEW")
+                 cal_curve = read(mat_contents,"CalibrationNumberEW")
             else
-                println("Unexpected Channel Number: ", adc_channel_number)
+                error("Unexpected Channel Number: ", adc_channel_number)
             end
     
             freqs = abs.(cal_curve[:,1])
@@ -111,13 +114,16 @@ module VLF
     
             cal_factor = response[Fc_idx]
             #CalibrationNumber, contained in response[], is a coefficient to convert from DAQ counts to pT
+            close(mat_contents)
+        else
+            error("Calibration information not provided")
+        end 
+        for i in 1:length(raw_data[1])
             calibrated_data = raw_data[7][i] .* cal_factor
     
             cal_structure[7][i] = calibrated_data
-            #replace the uncalibrated data in cal_structure[7][] with the calibrated data
-            
+            #replace the uncalibrated data in cal_structure[7][] with the calibrated data  
         end
-        close(mat_contents)
         close(cal_file)
         return cal_structure
     
