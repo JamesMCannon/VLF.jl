@@ -201,15 +201,20 @@ module VLF
             This function adds in quadrature 2 channels of calibrated data together
         
             authors: James M Cannon
-            date of last modification: 12/07/23
+            date of last modification: 02/09/24
         =#
         
            Combined_Data = deepcopy(cal_data1)
            #copy the timing data contained in the rest of the data tuple to preserve when the tuple is returned
         
            for i = 1:length(cal_data1[1])
-            Combined_Data[1][i] = sqrt.(cal_data1[1][i].^2 .+ cal_data2[1][i].^2)
-            #add in quadrature (c = sqrt(a^2+b^2))
+
+                #check the lengths to be merged before merging
+                #more robust solution desired for situations where data is off by only 1 second
+                if length(cal_data1[1][i]) == length(cal_data2[1][i])
+                    Combined_Data[1][i] = sqrt.(cal_data1[1][i].^2 .+ cal_data2[1][i].^2)
+                    #add in quadrature (c = sqrt(a^2+b^2))
+                end
            end
            return Combined_Data
         
