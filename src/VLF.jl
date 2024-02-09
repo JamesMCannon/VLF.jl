@@ -309,6 +309,8 @@ module VLF
         title
         xlim = [0, 24]
         xticks = (0:4:24)
+        ylim = []
+        yticks
         primary_color = "#3CA0FA"
         grid = "both"
     end
@@ -346,8 +348,10 @@ module VLF
             authors: James M Cannon
             date of last modification: 12/15/23
         =#
+        count=1
         for i in axis_data_fcn
-            plt.plot(i[2][:],i[1][:],linewidth=0.5)
+            plt.plot(i[2][:],i[1][:],linewidth=0.5,color=opts.primary_color[count])
+            count=count+1
         end
         plt.grid(which = opts.grid)
         plt.xticks(opts.xticks)
@@ -355,7 +359,13 @@ module VLF
         plt.xlabel(opts.xlabel)
         plt.title(opts.title)
         plt.xlim(opts.xlim)
-        plt.legend(line_labels)
+        if !isempty(opts.ylim)
+            plt.ylim(opts.ylim)
+            plt.yticks(opts.yticks)
+        end
+        if !isempty(line_labels)
+            plt.legend(line_labels)
+        end
         plt.show()
     end
 
