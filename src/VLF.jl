@@ -132,7 +132,7 @@ module VLF
         =#
         cal_structure = Vector{fileData}(undef,length(raw_data))
         for i in eachindex(raw_data)
-            cal_structure[i] = calibrate_NB(raw_data[i],cal_file,cal_num)
+            cal_structure[i] = calibrate_NB(raw_data[i],cal_file=cal_file,cal_num=cal_num)
         end
         return cal_structure
     end
