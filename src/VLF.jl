@@ -91,7 +91,7 @@ module VLF
                     cur_data =  vec(read(files[i],"data"))
 
                     cur_secs = cur_Fs*(cur_sec + cur_min*60 + cur_hour*3600)
-                    secs_vec = cur_secs:cur_Fs:cur_secs+length(cur_data)
+                    secs_vec = cur_secs:cur_Fs:cur_secs+length(cur_data)-1
 
                     if length(output)>0#this section combines files of the same day
                         if output[end].date == cur_date #If this file contains data for the same day as the previous file, append the data to the most recent data structure in the output vector
