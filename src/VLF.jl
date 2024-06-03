@@ -25,7 +25,7 @@ module VLF
         data::Vector{Float64} #amplitude or phase
         Fc::Float64 #center frequency of file, Hz
         Fs::Float64 #Sample frequency of file, Hz
-        adc_channel_number::Int64
+        adc_channel_number::Int64 #0 => NS, 1=> EW, -1=> Combined Channels
     end
 
     function read_multiple_mat_files(folder_path::AbstractString, include_pattern::AbstractString)
@@ -151,8 +151,6 @@ module VLF
             date of last modification: 04/25/24
         =#
 
-        cal_structure = deepcopy(raw_data) #copy the raw data structure to not lose timing information on return
-
         if cal_file=="default" && cal_num!=-1.0
             #use cal_num
             cal_factor = cal_num
@@ -179,7 +177,7 @@ module VLF
             error("Calibration information not provided")
         end 
 
-        cal_structure.data = raw_data.data .* cal_factor
+        cal_structure = fileData(raw_data.date,raw_data.time,raw_data.data .* cal_factor,raw_data.Fc,raw_data.Fs,raw_data.adc_channel_number)
         
         close(cal_file)
         return cal_structure
@@ -226,8 +224,7 @@ module VLF
 
         #more robust solution desired for situations where data is off by only 1 second
         if cal_data1.time == cal_data2.time
-            Combined_Data = deepcopy(cal_data1)
-            Combined_Data.data = sqrt.(cal_data1.data.^2 .+ cal_data2.data.^2)
+            Combined_Data = fileData(cal_data1.date,cal_data1.time,sqrt.(cal_data1.data.^2 .+ cal_data2.data.^2),cal_data1.Fc,cal_data1.Fs,-1)
             #add in quadrature (c = sqrt(a^2+b^2))
         else
             error("Unable to combine channels - timing data missmatch")
