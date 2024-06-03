@@ -244,13 +244,13 @@ module VLF
             This function adds two channels in quadrature over a number of days
             TODO add robust data checking before passing to the single day version of the function
             authors: James M Cannon
-            date of last modification: 04/25/24
+            date of last modification: 06/03/24
         =#
-        Combined_Data = Vector{fileData}(undef,length(raw_data))
+        
         if length(cal_vec1) != length(cal_vec2)
             error("Unable to combine channels - different number of days")
         end
-
+        Combined_Data = Vector{fileData}(undef,length(cal_vec1))
         for i in eachindex(cal_vec1)
             Combined_Data[i] = combine_2ch(cal_vec1[i],cal_vec2[i])
         end
