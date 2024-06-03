@@ -77,7 +77,7 @@ module VLF
                 cur_day =  read(files[i],"start_day")[1]
 
                 cur_date = Date(cur_year,cur_month,cur_day)
-
+            
                 if Dates.value(cur_date) >= Dates.value(Date(first_date)) && Dates.value(cur_date) <= Dates.value(Date(last_date))
 
                     #Need the [1] behind each "read" function because "read" returns a matrix
@@ -86,7 +86,7 @@ module VLF
                     cur_sec = read(files[i],"start_second")[1]
                     cur_Fs = read(files[i],"Fs")[1]
                     cur_Fc = read(files[i],"Fc")[1]
-                    cur_adc = read(files[i],"adc_channel_num")[1]
+                    cur_adc = read(files[i],"adc_channel_number")[1]
 
                     cur_data =  vec(read(files[i],"data"))
 
@@ -111,6 +111,7 @@ module VLF
                 end
             catch x
                 println("Unable to read file: ",files[i])
+                println(x,"\n\n") #print the exception that caused the file to be unreadable for better debugging ability
             end
             close(files[i])
         end
