@@ -25,7 +25,7 @@ module VLF
         data::Vector{Float64} #amplitude or phase
         Fc::Float64 #center frequency of file, Hz
         Fs::Float64 #Sample frequency of file, Hz
-        adc_channel_num::Int64
+        adc_channel_number::Int64
     end
 
     function read_multiple_mat_files(folder_path::AbstractString, include_pattern::AbstractString)
