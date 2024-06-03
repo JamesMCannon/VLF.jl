@@ -409,7 +409,7 @@ module VLF
             date of last modification: 05/31/24
         =#
 
-        plt.plot(site_data.time,site_data.data,color=opts.primary_color, label=line_label,linewidth=0.5)
+        plt.plot(site_data.time./(3600),site_data.data,color=opts.primary_color, label=line_label,linewidth=0.5)
         plt.grid(which = opts.grid)
         plt.xticks(opts.xticks)
         plt.ylabel(opts.ylabel)
