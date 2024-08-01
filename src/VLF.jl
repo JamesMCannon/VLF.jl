@@ -50,6 +50,28 @@ module VLF
         return data
     end
 
+    function read_multiple_mat_files(folder_path::AbstractString, include_pattern::Regex)
+        mat_files = filter(f -> isfile(joinpath(folder_path, f)), readdir(folder_path))
+        data = []
+    
+        for file in mat_files
+            if occursin(".mat", file)
+                file_path = joinpath(folder_path, file)
+                
+                # Check if the file should be included based on the common part of the file name
+                include_file = occursin(include_pattern, file)
+                
+                if include_file
+                    mat_contents = matopen(file_path)
+                    push!(data, mat_contents)
+                end
+                close(file_path)
+            end
+        end
+    
+        return data
+    end
+
     function read_data(files::Vector,first_date::String="2000-01-01",last_date::String="2500-01-01") 
         #=
             files: Vector{Any} containing MAT.MAT_v4.Matlabv4File s of data. Usually, 1 transmitter, 1 channel, amplitude OR phase at a time
@@ -460,7 +482,7 @@ module VLF
     #TODO Add a new plot_multi_site function to use the new fileData structure
     #TODO comment and double check the unwrap function. Perhaps make changes to use fileData structure? Might be uneccesary as the call can simply be fileData.data = unwrap(fileData.data)
 
-    function unwrap(phase::Vector{Any})
+    function unwrap(phase::Vector{})
         unwrapped_phase = copy(phase)
         unwrapped_phase[1] = phase[1]
 
