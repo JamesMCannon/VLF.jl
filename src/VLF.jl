@@ -18,6 +18,7 @@ module VLF
     export combine_2ch
     export plot_day
     export plot_multi_site
+    export tx_On
 
     struct fileData
         date::Date
@@ -85,6 +86,8 @@ module VLF
             TODO could be more robust in checking Fc, amp vs phase, adc_channel_number, etc when determining when to add to prior struct vs creating a new struct
 
             TODO more robust logic for the case that files are opened un-ordered (i.e., files 3 and 5 share a date but file 4 has a different date)
+
+            TODO check time vector math for 50Hz... might currently be 1/50Hz
 
             authors: James M Cannon
             date of last modification: 04/24/24
@@ -270,9 +273,13 @@ module VLF
         if length(cal_vec1) != length(cal_vec2)
             error("Unable to combine channels - different number of days")
         end
-        Combined_Data = Vector{fileData}(undef,length(cal_vec1))
+        Combined_Data = Vector{fileData}()
         for i in eachindex(cal_vec1)
-            Combined_Data[i] = combine_2ch(cal_vec1[i],cal_vec2[i])
+            if cal_vec1[i].time == cal_vec2[i].time
+                push!(Combined_Data, combine_2ch(cal_vec1[i],cal_vec2[i]))
+            else
+                println("Skipping ",cal_vec1[i].date," due to timing data mismatch")
+            end
         end
         return Combined_Data
     end
@@ -501,5 +508,56 @@ module VLF
 
         return phase
     end
+
+    function tx_On(folder_path::AbstractString, tx::AbstractString, date::Date)
+        #=
+            folder_path: path to the directory where the tx data is housed
+            tx: the transmitter in question
+            date: date of lookup
+
+            This function checks which seconds the tx was on for the date requested, returned as a fileData structure with data either 0 (off) or 1 (on)
+        
+            TODO add NML limits
+            TODO add ability to check 50Hz instead of just 1Hz
+            
+            authors: James M Cannon
+            date of last modification: 08/02/24
+        =#
+        NLK_EW_limit=6000
+    
+        if tx == "NLK"
+            limit = NLK_EW_limit
+            rx = "_EW_A"
+        else
+            error("Unknown limit for TX: ", tx)
+        end
+    
+        in_pat = Regex(join([Dates.format(date,"yymmdd"),".*",tx*rx]))
+        
+        cur_day = read_data(read_multiple_mat_files(folder_path,in_pat))
+        if length(cur_day)>1
+            error("For date ",date, " multiple VLF data structures created\n")
+        else
+            cur_day_struct = cur_day[1]
+        end
+    
+        time_vec = 0:1/cur_day_struct.Fs:(86400 - (1/cur_day_struct.Fs))
+        out_vec = zeros(length(time_vec))
+    
+        for t in eachindex(time_vec)
+            idx = findfirst(x -> x==time_vec[t],cur_day_struct.time)
+            if !isnothing(idx) 
+                if cur_day_struct.data[idx]>limit
+                    out_vec[t]=1
+                end
+            end
+        end
+    
+        out = VLF.fileData(date,time_vec,out_vec,cur_day_struct.Fc,cur_day_struct.Fs,cur_day_struct.adc_channel_number)
+    
+    
+        return(out)
+    end
     
 end
+
