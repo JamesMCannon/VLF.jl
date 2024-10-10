@@ -3,7 +3,7 @@ module VLF
     #Import needed modules
     using MAT
     using Dates
-    using PyPlot
+    using Plots
     using Parameters
 
     #Export all function names; can use VLF.foo() for any function, exported or not
@@ -19,6 +19,7 @@ module VLF
     export plot_day
     export plot_multi_site
     export tx_On
+    export stitchPhase
 
     struct fileData
         date::Date
@@ -44,7 +45,10 @@ module VLF
                     mat_contents = matopen(file_path)
                     push!(data, mat_contents)
                 end
-                close(file_path)
+                try
+                    close(file_path) 
+                catch
+                end
             end
         end
     
@@ -66,7 +70,10 @@ module VLF
                     mat_contents = matopen(file_path)
                     push!(data, mat_contents)
                 end
-                close(file_path)
+                try
+                    close(file_path) 
+                catch
+                end
             end
         end
     
@@ -138,7 +145,10 @@ module VLF
                 println("Unable to read file: ",files[i])
                 println(x,"\n\n") #print the exception that caused the file to be unreadable for better debugging ability
             end
-            close(files[i])
+            try
+                close(files[i]) 
+            catch
+            end
         end
         return output
 	end
@@ -204,7 +214,10 @@ module VLF
 
         cal_structure = fileData(raw_data.date,raw_data.time,raw_data.data .* cal_factor,raw_data.Fc,raw_data.Fs,raw_data.adc_channel_number)
         
-        close(cal_file)
+        try
+            close(cal_file) 
+        catch
+        end
         return cal_structure
     
     end
@@ -388,12 +401,12 @@ module VLF
         xlabel = "Time (Hrs)"
         ylabel
         title
-        xlim = [0, 24]
+        xlim = (0, 24)
         xticks = (0:4:24)
         ylim = []
         yticks = []
         primary_color = "#3CA0FA"
-        grid = "both"
+        minorgrid = true
     end
 
     function plot_day(axis_data_fcn::Vector; line_label="",opts::Plot_Options)
@@ -435,21 +448,21 @@ module VLF
             TODO make sure opts is an optional argument that, if not passed, is pulled using default plot options values.
         
             authors: James M Cannon
-            date of last modification: 05/31/24
+            date of last modification: 08/05/24
         =#
 
-        plt.plot(site_data.time./(3600),site_data.data,color=opts.primary_color, label=line_label,linewidth=0.5)
-        plt.grid(which = opts.grid)
-        plt.xticks(opts.xticks)
-        plt.ylabel(opts.ylabel)
-        plt.xlabel(opts.xlabel)
-        plt.title(opts.title)
+        p = plot(site_data.time./(3600),site_data.data,color=opts.primary_color, label=line_label,linewidth=0.5)
+        #xticks!(opts.xticks)
+        #ylabel!(opts.ylabel)
+        xlabel!(opts.xlabel)
+        title!(opts.title)
         if !isempty(opts.ylim)
-            plt.ylim(opts.ylim)
-            plt.yticks(opts.yticks)
+            ylims!(opts.ylim)
+            yticks!(opts.yticks)
         end
-        plt.xlim(opts.xlim)
-        plt.show()
+        xlims!(opts.xlim)
+        display(p)
+        return p
     end
 
     function plot_multi_site(axis_data_fcn::Vector; line_labels="",opts::Plot_Options)
@@ -509,6 +522,54 @@ module VLF
         return phase
     end
 
+    function clean_phase(tx_path::AbstractString,tx::AbstractString,day::fileData)
+        rx = "_EW_B"
+        in_pat = Regex(join([Dates.format(day.date,"yymmdd"),".*",tx*rx]))
+        
+        base_day = read_data(read_multiple_mat_files(tx_path,in_pat))
+
+        base_day_struct = base_day[1]
+
+        out_pha=[]
+
+        if length(base_day)>1
+            error("For date ",date, " multiple VLF data structures created\n")
+        else
+        
+            tx_on = tx_On(tx_path,tx,day.date)
+            off_idxes=findall(x->x==0,tx_on.data)
+            off_times=tx_on.time[off_idxes]
+            if length(off_times)>1
+                for time in off_times
+                    if !isnothing(findfirst(x->x==time,day.time))
+                        deleteat!(day.data,findfirst(x->x==time,day.time))
+                        deleteat!(day.time,findfirst(x->x==time,day.time))
+                    end
+                    if !isnothing(findfirst(x->x==time,base_day_struct.time))
+                        deleteat!(base_day_struct.data,findfirst(x->x==time,base_day_struct.time))
+                        deleteat!(base_day_struct.time,findfirst(x->x==time,base_day_struct.time))
+                    end 
+                end
+            end
+
+            if length(day.time) != length(base_day_struct.time)
+                for time in day.time
+                    if !isnothing(findfirst(x->x==time,base_day_struct.time))
+                        append!(out_pha,(day.data[findfirst(x->x==time,day.time)] - base_day_struct.data[findfirst(x->x==time,base_day_struct.time)]))
+                    end 
+                end
+                if length(out_pha)!=length(day.time)
+                    println("Mismatched phase and time lengths in cleaning phase")
+                end
+            else
+                out_pha=day.data - base_day_struct.data
+            end
+            return(fileData(day.date,day.time,out_pha,day.Fc,day.Fs,day.adc_channel_number))
+        end
+
+    end
+
+
     function tx_On(folder_path::AbstractString, tx::AbstractString, date::Date)
         #=
             folder_path: path to the directory where the tx data is housed
@@ -519,14 +580,17 @@ module VLF
         
             TODO add NML limits
             TODO add ability to check 50Hz instead of just 1Hz
-            
+
             authors: James M Cannon
             date of last modification: 08/02/24
         =#
         NLK_EW_limit=6000
-    
+        NML_EW_limit = 2000
         if tx == "NLK"
             limit = NLK_EW_limit
+            rx = "_EW_A"
+        elseif tx == "NML"
+            limit = NML_EW_limit
             rx = "_EW_A"
         else
             error("Unknown limit for TX: ", tx)
@@ -535,28 +599,73 @@ module VLF
         in_pat = Regex(join([Dates.format(date,"yymmdd"),".*",tx*rx]))
         
         cur_day = read_data(read_multiple_mat_files(folder_path,in_pat))
-        if length(cur_day)>1
-            error("For date ",date, " multiple VLF data structures created\n")
-        else
-            cur_day_struct = cur_day[1]
-        end
-    
+
+        cur_day_struct = cur_day[1]
         time_vec = 0:1/cur_day_struct.Fs:(86400 - (1/cur_day_struct.Fs))
         out_vec = zeros(length(time_vec))
-    
-        for t in eachindex(time_vec)
-            idx = findfirst(x -> x==time_vec[t],cur_day_struct.time)
-            if !isnothing(idx) 
-                if cur_day_struct.data[idx]>limit
-                    out_vec[t]=1
+
+        if length(cur_day)>1
+            println("For date ",date, " multiple VLF data structures created\n")
+        else
+        
+            for t in eachindex(time_vec)
+                idx = findfirst(x -> x==time_vec[t],cur_day_struct.time)
+                if !isnothing(idx) 
+                    if cur_day_struct.data[idx]>limit
+                        out_vec[t]=1
+                    end
                 end
             end
+
         end
     
         out = VLF.fileData(date,time_vec,out_vec,cur_day_struct.Fc,cur_day_struct.Fs,cur_day_struct.adc_channel_number)
     
-    
         return(out)
+    end
+
+    function stitchPhase(days::Vector{fileData};tolerance::Number=10,unwrap=true)
+        output = Vector{fileData}()
+        for day in days
+            append!(output,[stitchPhase(day,tolerance=tolerance,unwrap=unwrap)])
+        end
+        return output
+    end
+
+
+    function stitchPhase(day::fileData;tolerance::Number=10,unwrap=true)
+
+        #TODO find a general expression to check n x 90 degrees
+
+        if unwrap
+            phase = VLF.unwrap(day.data)
+        else
+            phase = day.data
+        end
+
+        for i in 1:length(day.time)-1
+            if (day.time[i+1]-day.time[i])>(day.Fs)
+                del_phase = phase[i+1] - phase[i]
+
+                if ((1*90)-tolerance< del_phase <(1*90)+tolerance)
+                    correction = -90
+                elseif ((2*90)-tolerance< del_phase < (2*90)+tolerance)
+                    correction = -180
+                elseif ((3*90)-tolerance< del_phase < (3*90)+tolerance)
+                    correction = -270
+                elseif ((-1*90)-tolerance< del_phase < (-1*90)+tolerance)
+                    correction = 90
+                elseif ((-2*90)-tolerance< del_phase < (-2*90)+tolerance)
+                    correction = 180
+                elseif ((-3*90)-tolerance< del_phase < (-3*90)+tolerance)
+                    correction = 270
+                else
+                    correction = 0
+                end
+                phase[i+1:end] = phase[i+1:end].+correction
+           end
+        end
+        return fileData(day.date,day.time,phase,day.Fc,day.Fs,day.adc_channel_number)
     end
     
 end
