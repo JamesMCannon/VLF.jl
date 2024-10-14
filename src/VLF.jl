@@ -668,5 +668,87 @@ module VLF
         return fileData(day.date,day.time,phase,day.Fc,day.Fs,day.adc_channel_number)
     end
     
+    function getVLFdata(folder_path,Transmitter_code,date,cal_file;unwrap_phase=true,legacy_flag)
+
+        if legacy_flag
+            EW = "_100"
+            NS = "_101"
+        else
+            EW = "_EW_"
+            NS = "_NS_"
+        end
+    
+        date_str = Dates.format(Date(date),"yymmdd")
+    
+        EW_pha_in_pat = Regex(join([date_str,".*",Transmitter_code*EW*"B"]))
+        EW_pha_days = read_data(read_multiple_mat_files(folder_path,EW_pha_in_pat))
+    
+        NS_pha_in_pat = Regex(join([date_str,".*",Transmitter_code*NS*"B"]))
+        NS_pha_days = read_data(read_multiple_mat_files(folder_path,NS_pha_in_pat))
+    
+        EW_amp_in_pat = Regex(join([date_str,".*",Transmitter_code*EW*"A"]))
+        EW_amp_days = calibrate_NB(read_data(read_multiple_mat_files(folder_path,EW_amp_in_pat)),cal_file=cal_file)
+    
+        NS_amp_in_pat = Regex(join([date_str,".*",Transmitter_code*NS*"A"]))
+        NS_amp_days = calibrate_NB(read_data(read_multiple_mat_files(folder_path,NS_amp_in_pat)),cal_file=cal_file)
+    
+        amp_Combined_Data = combine_2ch(NS_amp_days,EW_amp_days)
+    
+        NS_stitched_phase = stitchPhase(NS_pha_days,unwrap=unwrap_phase)
+        EW_stitched_phase = stitchPhase(EW_pha_days,unwrap=unwrap_phase)
+    
+        return amp_Combined_Data, NS_stitched_phase, EW_stitched_phase
+    end
+    
+    function getVLFdata(folder_path,Transmitter_code,date,cal_file;unwrap_phase=true,Phase_Baseline_Path=nothing,tolerance=10,legacy_flag=false)
+    
+        if legacy_flag
+            EW = "_100"
+            NS = "_101"
+        else
+            EW = "_EW_"
+            NS = "_NS_"
+        end
+    
+        if isnothing(Phase_Baseline_Path)
+            if Transmitter_code == "NLK"
+                Phase_Baseline_Path = "L:\\VLF\\AVID\\ARL\\Narrowband\\"
+            elseif Transmitter_code == "NML"
+                Phase_Baseline_Path = "L:\\VLF\\AVID\\LAM\\Narrowband\\"
+            else
+                error("Unknown transmitter, ",Transmitter_code)
+            end
+            year = Dates.format(Date(date),"yyyy")
+            month = Dates.format(Date(date),"mm") *"_"* Dates.monthname(Date(date))
+            Phase_Baseline_Path = Phase_Baseline_Path*year*"\\"*month*"\\"
+        end
+    
+        date_str = Dates.format(Date(date),"yymmdd")
+    
+        EW_pha_in_pat = Regex(join([date_str,".*",Transmitter_code*EW*"B"]))
+        EW_pha_days = read_data(read_multiple_mat_files(folder_path,EW_pha_in_pat))
+    
+        NS_pha_in_pat = Regex(join([date_str,".*",Transmitter_code*NS*"B"]))
+        NS_pha_days = read_data(read_multiple_mat_files(folder_path,NS_pha_in_pat))
+    
+        EW_amp_in_pat = Regex(join([date_str,".*",Transmitter_code*EW*"A"]))
+        EW_amp_days = calibrate_NB(read_data(read_multiple_mat_files(folder_path,EW_amp_in_pat)),cal_file=cal_file)
+    
+        NS_amp_in_pat = Regex(join([date_str,".*",Transmitter_code*NS*"A"]))
+        NS_amp_days = calibrate_NB(read_data(read_multiple_mat_files(folder_path,NS_amp_in_pat)),cal_file=cal_file)
+    
+        amp_Combined_Data = combine_2ch(NS_amp_days,EW_amp_days)
+    
+        NS_clean_pha = VLF.clean_phase.(Phase_Baseline_Path,Transmitter_code,NS_pha_days)
+        EW_clean_pha = VLF.clean_phase.(Phase_Baseline_Path,Transmitter_code,EW_pha_days)
+    
+        NS_stitched_phase = stitchPhase(NS_clean_pha,unwrap=unwrap_phase,tolerance=tolerance)
+        EW_stitched_phase = stitchPhase(EW_clean_pha,unwrap=unwrap_phase,tolerance=tolerance)
+    
+        return amp_Combined_Data, NS_stitched_phase, EW_stitched_phase
+    end
+    
+    
+
 end
 
