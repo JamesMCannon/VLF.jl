@@ -127,6 +127,117 @@ amplitudes(day::ProcessedDay; efield::Bool = false, db::Bool = false) =
      NS       = amplitude(day, :NS;       efield = efield, db = db),
      combined = amplitude(day, :combined; efield = efield, db = db))
 
+# --- ProcessedView: a units projection of a ProcessedDay --------------------
+# The cache is canonical linear pT; conversion to µV/m / dB is a *presentation*
+# layer that lives entirely on top of `ProcessedDay`. A `ProcessedView` owns its
+# three converted amplitude arrays and borrows everything else (phase, metadata)
+# from its parent. It is never cached and never an input to arithmetic: combine
+# / calibrate in linear pT first, then view. Units only ever flow one way
+# (pT -> µV/m / dB), and re-viewing always re-derives from the pT parent, so a
+# conversion can never stack on itself.
+
+"""
+    AmplitudeUnits(efield, db)
+
+The two orthogonal amplitude-unit axes, mirroring [`apply_amplitude_units`](@ref):
+`efield` selects magnetic B (pT, `false`) vs electric E (µV/m, `true`); `db`
+selects linear (`false`) vs `20·log10` decibels (`true`).
+"""
+struct AmplitudeUnits
+    efield::Bool
+    db::Bool
+end
+
+"Human-readable label for [`AmplitudeUnits`](@ref), e.g. `\"pT\"`, `\"µV/m (dB)\"`."
+unit_label(u::AmplitudeUnits) = string(u.efield ? "µV/m" : "pT", u.db ? " (dB)" : "")
+
+"""
+    ProcessedView
+
+A read-only units projection of a [`ProcessedDay`](@ref). The three amplitude
+fields (`EW_amp`, `NS_amp`, `combined_amp`) are converted from the parent's
+canonical linear pT and owned by the view; phase and all metadata (`time`, `Fc`,
+`Fs`, `EW_pha`, `NS_pha`, `params`, …) are read through to the parent unchanged,
+so `view.EW_pha` works exactly like `day.EW_pha` (and shares its storage — treat
+phase as read-only here). `view.parent` recovers the underlying `ProcessedDay`.
+
+Built with [`view_units`](@ref). Never cached (a [`ProcessedView`](@ref) passed to
+the cache errors) and never fed back into [`combine_quadrature`](@ref) /
+[`calibrate`](@ref), which require linear pT and accept only `ProcessedDay`.
+
+See also [`view_units`](@ref), [`get_processed_view`](@ref), [`amplitudes`](@ref).
+"""
+struct ProcessedView
+    parent::ProcessedDay
+    units::AmplitudeUnits
+    EW_amp::Vector{Float64}
+    NS_amp::Vector{Float64}
+    combined_amp::Vector{Float64}
+end
+
+# Names the view answers for itself; everything else forwards to the parent.
+const _VIEW_OWN = (:parent, :units, :EW_amp, :NS_amp, :combined_amp)
+Base.getproperty(v::ProcessedView, n::Symbol) =
+    n in _VIEW_OWN ? getfield(v, n) : getproperty(getfield(v, :parent), n)
+Base.propertynames(::ProcessedView) = (fieldnames(ProcessedDay)..., :units, :parent)
+
+"""
+    view_units(day::ProcessedDay; efield=false, db=false) -> ProcessedView
+    view_units(view::ProcessedView; efield=false, db=false) -> ProcessedView
+
+Project `day` into the requested amplitude units, reusing [`amplitudes`](@ref)
+(which converts each stored pT field independently — `combined` is converted, not
+recombined). Viewing a [`ProcessedView`](@ref) re-projects its parent, so units
+never stack.
+"""
+function view_units(day::ProcessedDay; efield::Bool = false, db::Bool = false)
+    a = amplitudes(day; efield = efield, db = db)
+    return ProcessedView(day, AmplitudeUnits(efield, db), a.EW, a.NS, a.combined)
+end
+view_units(v::ProcessedView; efield::Bool = false, db::Bool = false) =
+    view_units(getfield(v, :parent); efield = efield, db = db)
+
+"""
+    amplitude(v::ProcessedView, which=:combined) -> Vector{Float64}
+
+Return one of the view's already-converted amplitude products (`:EW`, `:NS`, or
+`:combined`) as a fresh copy. Passing `efield`/`db` is an error: the view is
+already fixed to `v.units`, and re-converting would double-apply the scaling —
+re-view the parent (`view_units(v.parent; …)`) to change units instead.
+"""
+function amplitude(v::ProcessedView, which::Symbol = :combined;
+                   efield::Bool = false, db::Bool = false)
+    (efield || db) && error("amplitude(::ProcessedView; efield/db) is not allowed — the view is already in $(unit_label(getfield(v, :units))). Re-view the parent with view_units(v.parent; …) to change units.")
+    src = which === :EW       ? getfield(v, :EW_amp) :
+          which === :NS       ? getfield(v, :NS_amp) :
+          which === :combined ? getfield(v, :combined_amp) :
+          error("`which` must be :EW, :NS, or :combined (got :$which)")
+    return copy(src)
+end
+
+# Refuse to persist a presentation object: only canonical pT is cacheable.
+_save_entry(::AbstractString, ::ProcessedView) =
+    error("Refusing to cache a ProcessedView — only the canonical linear-pT ProcessedDay is cacheable. Cache the parent (view.parent) instead.")
+
+function Base.show(io::IO, v::ProcessedView)
+    print(io, "ProcessedView(", v.rx, "←", v.tx, " ", v.date, " | ",
+          unit_label(getfield(v, :units)), ", amp ",
+          round(_coverage(getfield(v, :combined_amp)); digits = 1), "% covered)")
+end
+
+function Base.show(io::IO, ::MIME"text/plain", v::ProcessedView)
+    u = unit_label(getfield(v, :units))
+    println(io, "ProcessedView: ", v.rx, " ← ", v.tx, "   ", v.date)
+    println(io, "  Fc   = ", v.Fc, " Hz    Fs = ", v.Fs, " Hz    ",
+            length(v.time), " samples    units = ", u)
+    println(io, "  EW_amp        (", u, ")   ", _cov(getfield(v, :EW_amp)), " covered")
+    println(io, "  NS_amp        (", u, ")   ", _cov(getfield(v, :NS_amp)), " covered")
+    println(io, "  combined_amp  (", u, ")   ", _cov(getfield(v, :combined_amp)), " covered")
+    println(io, "  EW_pha        (deg)  ", _cov(v.EW_pha), " covered")
+    println(io, "  NS_pha        (deg)  ", _cov(v.NS_pha), " covered")
+    print(io,   "  parent params: ", v.params)
+end
+
 # --- quadrature combine -----------------------------------------------------
 """
     combine_quadrature(ns, ew) -> Vector{Float64}
@@ -399,4 +510,25 @@ function get_processed(c::VLFCache, source_folder::AbstractString, rx, tx, date:
     _save_entry(processed_path(c, date, rx, tx), day)
     _index_add_processed!(c, date, rx, tx)
     return day
+end
+
+"""
+    get_processed_view(cache, source_folder, rx, tx, date, params;
+                       efield=false, db=false, recompute=false,
+                       baseline_ns=nothing, baseline_ew=nothing) -> Union{ProcessedView,Nothing}
+
+Convenience wrapper: build/read the canonical linear-pT [`ProcessedDay`](@ref) via
+[`get_processed`](@ref) (which caches it), then return a [`ProcessedView`](@ref) of
+it in the requested units. Units are *not* part of the cache key — only the pT
+parent is cached, and the projection happens after. Returns `nothing` when no raw
+data exists for the `(date, rx, tx)`.
+"""
+function get_processed_view(c::VLFCache, source_folder::AbstractString, rx, tx, date::Date,
+                            params::ProcessParams; efield::Bool = false, db::Bool = false,
+                            recompute::Bool = false,
+                            baseline_ns::Union{Nothing,RawDay} = nothing,
+                            baseline_ew::Union{Nothing,RawDay} = nothing)
+    day = get_processed(c, source_folder, rx, tx, date, params;
+                        recompute = recompute, baseline_ns = baseline_ns, baseline_ew = baseline_ew)
+    return day === nothing ? nothing : view_units(day; efield = efield, db = db)
 end

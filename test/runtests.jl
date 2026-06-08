@@ -499,4 +499,82 @@ end
                                   ProcessParams(cal_num=(EW=2.0, NS=4.0)))
 end
 
+@testset "process: ProcessedView (eager units projection)" begin
+    mktempdir() do dir
+        make_avid(dir; ch="EW", q="A", data=fill(3.0, 10))
+        make_avid(dir; ch="NS", q="A", data=fill(4.0, 10))
+        make_avid(dir; ch="EW", q="B", data=fill(30.0, 10))   # phase on EW only
+        cache = VLFCache(dir)
+        day = get_processed(cache, dir, :FSI, :NLK, Date(2025,6,1), ProcessParams(cal_num=2.0))
+        # parent stored in linear pT: EW=6, NS=8, combined=10
+        @test day.EW_amp[5] == 6.0 && day.NS_amp[5] == 8.0 && day.combined_amp[5] == 10.0
+
+        # default view is pT and equals the parent's stored amplitudes
+        vpt = view_units(day)
+        @test vpt isa ProcessedView
+        @test vpt.units == AmplitudeUnits(false, false)
+        @test unit_label(vpt.units) == "pT"
+        @test vpt.EW_amp[5] == 6.0 && vpt.combined_amp[5] == 10.0
+
+        # µV/m view converts each stored pT field (combined is CONVERTED, not recombined)
+        vE = view_units(day; efield=true)
+        @test unit_label(vE.units) == "µV/m"
+        @test vE.EW_amp[5]       ≈ 6.0  * VLF.PT_TO_UVM
+        @test vE.NS_amp[5]       ≈ 8.0  * VLF.PT_TO_UVM
+        @test vE.combined_amp[5] ≈ 10.0 * VLF.PT_TO_UVM
+
+        # dB view
+        vdb = view_units(day; db=true)
+        @test unit_label(vdb.units) == "pT (dB)"
+        @test vdb.combined_amp[5] == 20*log10(10.0)
+
+        # metadata + phase forward to the parent; phase is borrowed (shared identity)
+        @test vE.Fc == day.Fc && vE.Fs == day.Fs && vE.date == day.date
+        @test vE.params === day.params
+        @test vE.EW_pha === day.EW_pha            # read-through, not copied
+        @test vE.EW_pha[5] == 30.0
+        @test :EW_pha in propertynames(vE)
+
+        # the view OWNS its amplitude arrays: mutating them cannot reach the parent
+        vE.EW_amp[5] = -999.0
+        @test day.EW_amp[5] == 6.0
+
+        # parent handle + re-view never stacks conversions
+        @test vE.parent === day
+        vEE = view_units(vE; efield=true)         # re-view a view -> re-derives from pT parent
+        @test vEE.EW_amp[5] ≈ 6.0 * VLF.PT_TO_UVM # single conversion, not squared
+        @test vEE.parent === day
+
+        # amplitude(::ProcessedView) returns the already-converted field; asking for
+        # further conversion is a hard error (prevents double-conversion)
+        @test amplitude(vE, :combined)[5] ≈ 10.0 * VLF.PT_TO_UVM
+        @test_throws ErrorException amplitude(vE, :EW; db=true)
+        @test_throws ErrorException amplitude(vE, :bogus)
+
+        # views are never cacheable
+        @test_throws ErrorException VLF._save_entry(
+            processed_path(cache, Date(2025,6,1), :FSI, :NLK), vE)
+    end
+end
+
+@testset "process: get_processed_view convenience" begin
+    mktempdir() do dir
+        make_avid(dir; ch="EW", q="A", data=fill(3.0, 10))
+        make_avid(dir; ch="NS", q="A", data=fill(4.0, 10))
+        cache = VLFCache(dir)
+
+        v = get_processed_view(cache, dir, :FSI, :NLK, Date(2025,6,1),
+                               ProcessParams(cal_num=2.0); efield=true)
+        @test v isa ProcessedView
+        @test v.combined_amp[5] ≈ 10.0 * VLF.PT_TO_UVM
+        @test v.parent isa ProcessedDay
+        # building the view still cached the canonical pT parent
+        @test isfile(processed_path(cache, Date(2025,6,1), :FSI, :NLK))
+
+        # no data -> nothing (mirrors get_processed)
+        @test get_processed_view(cache, dir, :ZZZ, :NLK, Date(2025,6,1),
+                                 ProcessParams(cal_num=2.0)) === nothing
+    end
+end
+
 end # @testset "VLF.jl"

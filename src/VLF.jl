@@ -27,6 +27,7 @@ export calibrate, calibration_factor, combine_quadrature
 export pT_to_uVm, to_db, apply_amplitude_units, PT_TO_UVM
 export amplitude, amplitudes
 export unwrap_phase, stitch_phase, clean_phase, detrend_phase
-export build_processed, get_processed
+export build_processed, get_processed, get_processed_view
+export ProcessedView, AmplitudeUnits, view_units, unit_label
 
 end # module VLF
