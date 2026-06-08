@@ -19,8 +19,18 @@ entries. Bump this whenever the meaning or layout of a stored struct changes
 (units, field order, sign conventions, ...). On load, a mismatch triggers a
 rebuild rather than silently reinterpreting stale bytes. MAT-file immutability
 protects the *inputs*; `SCHEMA_VERSION` protects the *cache layout*.
+
+Bumped 1 → 2: [`ProcessParams`](@ref) (serialized inside every cached
+[`ProcessedDay`](@ref)) gained a `slope` field and the phase pipeline now
+slope-detrends, so v1 entries are rebuilt rather than reinterpreted. Amplitudes
+remain stored in linear pT; µV/m and dB are applied at read time.
+
+Bumped 2 → 3: [`ProcessParams`](@ref) `cal_num` widened from `Float64` to
+`Union{Float64,NamedTuple}` to allow per-channel calibration (`cal_num =
+(EW = a, NS = b)`). Since `ProcessParams` is serialized inside every cached
+[`ProcessedDay`](@ref), v2 entries are rebuilt rather than reinterpreted.
 """
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 3
 
 """
     Channel
@@ -85,30 +95,58 @@ Base.hash(k::DataKey, h::UInt) =
 # caller is now asking for.
 # ----------------------------------------------------------------------------
 """
-    ProcessParams(; cal_file, cal_num, tolerance, unwrap, baseline)
+    ProcessParams(; cal_file="", cal_num=-1.0, tolerance=10.0, unwrap=true,
+                    baseline="", slope=nothing)
 
 Settings that determine a [`ProcessedDay`](@ref). Stored as provenance so a
-cached product can be checked against the parameters requested on load.
+cached product can be checked against the parameters requested on load. The
+defaults are shown in the signature above; pass only the keywords you need.
 
-- `cal_file::String` : calibration file path, or `""` if a scalar was used.
-- `cal_num::Float64` : scalar calibration factor, or `-1.0` if a file was used.
-- `tolerance::Float64` : ± window (deg) for n×90° phase-jump stitching.
-- `unwrap::Bool` : whether phase was unwrapped before stitching.
-- `baseline::String` : phase-baseline source, or `""` if none subtracted.
+Amplitude *units* are intentionally NOT here: the cache always stores linear pT,
+and pT↔µV/m / linear↔dB conversions are applied at read time (see
+[`amplitude`](@ref) / [`amplitudes`](@ref)), so a viewer can switch units ad hoc
+without recomputing.
+
+Calibration (counts → pT):
+- `cal_file::String = ""` — calibration file path, or `""` when a scalar is used.
+- `cal_num::Union{Float64,NamedTuple} = -1.0` — calibration factor. Either a
+  single scalar applied to *both* channels, or a per-channel NamedTuple
+  `(EW = a, NS = b)` keyed by channel name. The scalar sentinel `-1.0` means
+  "unset, read `cal_file` instead" (a NamedTuple is always considered set). When
+  a NamedTuple is given it must contain the key for any channel actually being
+  calibrated, else an error is raised; `cal_file` is ignored.
+
+Phase:
+- `tolerance::Float64 = 10.0` — ± window (deg) for n×90° phase-jump stitching.
+- `unwrap::Bool = true` — whether phase is unwrapped before detrend/stitch.
+- `baseline::String = ""` — provenance label for the phase baseline, or `""`.
+- `slope::Union{Nothing,Float64} = nothing` — linear phase-detrend rate (deg/s).
+  See [`detrend_phase`](@ref): with no reference baseline it detrends every
+  sample as `slope · t` (`t` = seconds-from-midnight; `nothing` ⇒ no detrend,
+  the original behavior). Where a reference baseline drops out but the target is
+  valid, the reference is *extrapolated* from its last valid value at this slope
+  so the result stays continuous (`nothing` ⇒ `NaN` across the dropout).
+
+!!! note
+    `slope` IS baked into the cached [`ProcessedDay`](@ref) (it changes the phase
+    product), so changing it requires `recompute=true` in [`get_processed`](@ref);
+    otherwise a provenance mismatch warns and the cached product is served. Unit
+    choices (µV/m, dB) are not baked in and never need a recompute.
 """
 Base.@kwdef struct ProcessParams
-    cal_file::String  = ""
-    cal_num::Float64  = -1.0
+    cal_file::String   = ""
+    cal_num::Union{Float64,NamedTuple} = -1.0
     tolerance::Float64 = 10.0
-    unwrap::Bool      = true
-    baseline::String  = ""
+    unwrap::Bool       = true
+    baseline::String   = ""
+    slope::Union{Nothing,Float64} = nothing
 end
 
 "True if two parameter sets would produce the same product."
 provenance_matches(a::ProcessParams, b::ProcessParams) =
     a.cal_file == b.cal_file && a.cal_num == b.cal_num &&
     a.tolerance == b.tolerance && a.unwrap == b.unwrap &&
-    a.baseline == b.baseline
+    a.baseline == b.baseline && a.slope == b.slope
 
 # ----------------------------------------------------------------------------
 # RawDay
@@ -154,9 +192,11 @@ end
     ProcessedDay
 
 Calibrated/cleaned products for one `(date, rx, tx)`, all co-registered on the
-same [`timegrid`](@ref). Amplitudes are in pT; phases are in degrees, cleaned
-(optionally baseline-subtracted) and stitched (optionally unwrapped). `dominant`
-phase is reserved for a future revision. `params` records provenance.
+same [`timegrid`](@ref). Amplitudes are stored in linear pT (convert to µV/m
+and/or dB at read time with [`amplitude`](@ref)/[`amplitudes`](@ref)); phases are
+in degrees, cleaned (optionally baseline-subtracted and/or slope-detrended) and
+stitched (optionally unwrapped). `dominant` phase is reserved for a future
+revision. `params` records provenance.
 
 # Fields
 - `date::Date` — UTC day this product covers.

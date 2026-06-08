@@ -24,7 +24,9 @@ export raw_path, processed_path
 
 # --- processing ---
 export calibrate, calibration_factor, combine_quadrature
-export unwrap_phase, stitch_phase, clean_phase
+export pT_to_uVm, to_db, apply_amplitude_units, PT_TO_UVM
+export amplitude, amplitudes
+export unwrap_phase, stitch_phase, clean_phase, detrend_phase
 export build_processed, get_processed
 
 end # module VLF

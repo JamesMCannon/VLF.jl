@@ -7,16 +7,33 @@
 # ============================================================================
 
 # --- calibration ------------------------------------------------------------
+# Resolve `cal_num` for a single channel.
+#   * A scalar applies to both channels; the sentinel -1.0 means "unset" so the
+#     caller falls through to `cal_file` (returns `nothing`).
+#   * A NamedTuple selects per channel by name (:EW / :NS). It is always treated
+#     as "set" and must contain the key for the channel being calibrated.
+_cal_num_for(cal_num::Real, ::Channel) = cal_num == -1.0 ? nothing : float(cal_num)
+function _cal_num_for(cal_num::NamedTuple, ch::Channel)
+    name = Symbol(chstr(ch))            # :EW or :NS
+    haskey(cal_num, name) ||
+        error("Per-channel cal_num has no entry for the $name channel (keys: $(keys(cal_num))).")
+    return float(cal_num[name])
+end
+
 """
     calibration_factor(amp_day::RawDay, params) -> Float64
 
-Counts→pT scale factor. Uses `params.cal_num` if set (≠ -1.0); otherwise reads
-`params.cal_file`, selects the NS/EW curve by `amp_day.channel`, and takes the
-response at the frequency nearest `amp_day.Fc` (cal-file frequencies are in kHz).
+Counts→pT scale factor for `amp_day`'s channel. Uses `params.cal_num` when set:
+a scalar applies to both channels, while a NamedTuple `(EW = …, NS = …)` selects
+the factor for `amp_day.channel`. A scalar `-1.0` (the unset sentinel) instead
+reads `params.cal_file`, selects the NS/EW curve by `amp_day.channel`, and takes
+the response at the frequency nearest `amp_day.Fc` (cal-file frequencies are in
+kHz). A NamedTuple `cal_num` always takes precedence over `cal_file`.
 """
 function calibration_factor(amp_day::RawDay, params::ProcessParams)
-    if params.cal_num != -1.0
-        return params.cal_num
+    cn = _cal_num_for(params.cal_num, amp_day.channel)
+    if cn !== nothing
+        return cn
     elseif !isempty(params.cal_file) && params.cal_file != "default"
         mf = matopen(params.cal_file)
         try
@@ -41,6 +58,74 @@ Amplitude in pT. NaN gaps stay NaN.
 """
 calibrate(amp_day::RawDay, params::ProcessParams) =
     amp_day.data .* calibration_factor(amp_day, params)
+
+# --- amplitude units (pT <-> µV/m, linear <-> dB) ---------------------------
+# Far-field plane-wave relation E = c·B, using the speed of light in sea-level
+# air (c_vacuum / n_air, n_air ≈ 1.000293 at standard sea-level conditions).
+const C_VACUUM        = 299_792_458.0          # m/s (exact)
+const N_AIR_SEA_LEVEL = 1.000293               # radio refractive index, sea level
+const C_AIR           = C_VACUUM / N_AIR_SEA_LEVEL
+
+# B in pT (1e-12 T) → E in µV/m (1e-6 V/m): E = c_air·B[T]·1e6 = c_air·1e-6·B[pT].
+"µV/m of E-field per pT of B-field for a plane wave in sea-level air (≈ 299.70)."
+const PT_TO_UVM = C_AIR * 1e-6
+
+"""
+    pT_to_uVm(amp_pT)
+
+Convert a magnetic-field amplitude in pT to electric field in µV/m for a plane
+wave in sea-level air (`E = c_air · B`; [`PT_TO_UVM`](@ref) ≈ 299.70 µV/m per pT).
+Broadcasts over scalars or arrays; `NaN` gaps are preserved.
+"""
+pT_to_uVm(amp_pT) = amp_pT .* PT_TO_UVM
+
+"""
+    to_db(x) -> Float64
+
+Field amplitude in dB, `20·log10(x)`. `NaN` is passed through, and non-positive
+values map to `NaN` (a true zero would be −∞ dB, which would poison plots/stats).
+"""
+to_db(x::Real) = (isnan(x) || x <= 0) ? NaN : 20 * log10(x)
+
+"""
+    apply_amplitude_units(amp_pT; efield=false, db=false) -> Vector{Float64}
+
+Express a linear-pT amplitude vector in other units: pT or µV/m (`efield`), then
+linear or dB (`db`). `NaN` gaps are preserved. Quadrature combination must be
+done in linear units *before* this is applied.
+"""
+function apply_amplitude_units(amp_pT::AbstractVector; efield::Bool = false, db::Bool = false)
+    lin = efield ? amp_pT .* PT_TO_UVM : amp_pT
+    return db ? to_db.(lin) : collect(float.(lin))
+end
+
+"""
+    amplitude(day::ProcessedDay, which=:combined; efield=false, db=false) -> Vector{Float64}
+
+Return one of `day`'s amplitude products in the requested units, converted at
+read time from the canonical linear-pT cache (so switching units never triggers
+a recompute). `which` is `:EW`, `:NS`, or `:combined`; units follow `efield`
+(pT→µV/m) and `db` (linear→dB). See [`apply_amplitude_units`](@ref).
+"""
+function amplitude(day::ProcessedDay, which::Symbol = :combined;
+                   efield::Bool = false, db::Bool = false)
+    v = which === :EW       ? day.EW_amp :
+        which === :NS       ? day.NS_amp :
+        which === :combined ? day.combined_amp :
+        error("`which` must be :EW, :NS, or :combined (got :$which)")
+    return apply_amplitude_units(v; efield = efield, db = db)
+end
+
+"""
+    amplitudes(day::ProcessedDay; efield=false, db=false) -> NamedTuple
+
+All three amplitude products converted at read time:
+`(EW = …, NS = …, combined = …)`. See [`amplitude`](@ref).
+"""
+amplitudes(day::ProcessedDay; efield::Bool = false, db::Bool = false) =
+    (EW       = amplitude(day, :EW;       efield = efield, db = db),
+     NS       = amplitude(day, :NS;       efield = efield, db = db),
+     combined = amplitude(day, :combined; efield = efield, db = db))
 
 # --- quadrature combine -----------------------------------------------------
 """
@@ -124,15 +209,106 @@ replaces the old time-alignment loop with a plain subtraction. NaN-aware.
 clean_phase(day_phase::AbstractVector, baseline_phase::AbstractVector) =
     day_phase .- baseline_phase
 
+# --- phase: linear-slope detrend (with optional reference baseline) ---------
+"""
+    detrend_phase(target, baseline, slope, time) -> Vector{Float64}
+
+Resolve a `target` phase against an optional reference `baseline` phase and an
+optional linear `slope` (deg/s) over `time` (seconds-from-midnight), elementwise:
+
+- **No baseline** (`baseline === nothing`): subtract `slope · t` from every
+  sample. `slope === nothing` is treated as no detrend — the phase is returned
+  unchanged (the original behavior).
+- **Baseline present**: where the baseline is valid, subtract it
+  (`target − baseline`). Where the baseline is `NaN` but the target is valid, the
+  reference is *extrapolated forward from its last valid value* at `slope`, i.e.
+  `target − (R₀ + slope · (t − t₀))` where `(t₀, R₀)` is the most recent valid
+  reference sample. Because the synthesized reference equals `R₀` at `t₀`, the
+  result is continuous across the entry into the gap (no step). If no reference
+  has been seen yet (a leading gap), it falls back to `target − slope · t`.
+  When `slope === nothing`, gaps are `NaN` (the original behavior).
+
+A `NaN` in the target always yields `NaN`. The inputs are not mutated.
+
+!!! note
+    Continuity is guaranteed entering a gap. When the real reference resumes the
+    output returns to `target − baseline`, which may step if the extrapolation
+    drifted away from the resumed reference — real data is trusted over the
+    extrapolation there.
+"""
+function detrend_phase(target::AbstractVector,
+                       baseline::Union{Nothing,AbstractVector},
+                       slope::Union{Nothing,Real},
+                       time::AbstractVector)
+    n = length(target)
+    baseline === nothing || length(baseline) == n ||
+        throw(DimensionMismatch("baseline length $(length(baseline)) ≠ target length $n"))
+    length(time) == n ||
+        throw(DimensionMismatch("time length $(length(time)) ≠ target length $n"))
+
+    out = Vector{Float64}(undef, n)
+    s = slope === nothing ? nothing : float(slope)
+
+    if baseline === nothing
+        @inbounds for i in 1:n
+            t = float(target[i])
+            out[i] = s === nothing ? t : t - s * time[i]
+        end
+        return out
+    end
+
+    have_anchor = false
+    t0 = 0.0          # time of the last valid reference sample
+    r0 = 0.0          # value of the last valid reference sample
+    @inbounds for i in 1:n
+        t = float(target[i])
+        b = float(baseline[i])
+        if !isnan(b)
+            out[i] = t - b                       # NaN if target NaN; else cleaned value
+            have_anchor = true; t0 = time[i]; r0 = b
+        elseif isnan(t) || s === nothing
+            out[i] = NaN                         # target gap, or no slope -> drop
+        elseif have_anchor
+            out[i] = t - (r0 + s * (time[i] - t0))   # extrapolate reference from anchor
+        else
+            out[i] = t - s * time[i]             # leading gap: detrend from origin
+        end
+    end
+    return out
+end
+
+# Full phase pipeline: (optional) unwrap → baseline/slope resolve → n×90° stitch.
+# Unwrapping happens here so the slope detrends the UNWRAPPED phase; stitch then
+# runs with unwrap already done. With slope === nothing and no baseline this
+# reduces exactly to the previous `stitch_phase(target; unwrap=params.unwrap)`.
+function _clean_detrend_stitch(target::AbstractVector,
+                               baseline::Union{Nothing,AbstractVector},
+                               params::ProcessParams, time::AbstractVector)
+    tgt  = params.unwrap ? unwrap_phase(target) : collect(float.(target))
+    base = baseline === nothing ? nothing :
+           (params.unwrap ? unwrap_phase(baseline) : baseline)
+    cleaned = detrend_phase(tgt, base, params.slope, time)
+    return stitch_phase(cleaned; tolerance = params.tolerance, unwrap = false)
+end
+
 # --- build / get ProcessedDay ----------------------------------------------
 """
     build_processed(cache, source_folder, rx, tx, date, params;
-                    baseline_ns=nothing, baseline_ew=nothing) -> ProcessedDay
+                    baseline_ns=nothing, baseline_ew=nothing) -> Union{ProcessedDay,Nothing}
 
 Assemble a [`ProcessedDay`](@ref) from raw entries (pulled via [`get_raw`](@ref),
-so they cache on first read). Requires both amplitude channels; phase channels
-are optional (filled with NaN if missing). `baseline_ns`/`baseline_ew` are
-optional reference-receiver phase [`RawDay`](@ref)s to subtract before stitching.
+so they cache on first read). Amplitude channels are optional: a missing EW or NS
+amplitude (and the resulting `combined_amp`) is filled with `NaN` and a warning is
+emitted, rather than erroring — so a sweep over many days is not interrupted by a
+single day whose instrument never produced that channel. Phase channels are
+likewise optional (NaN if missing). Returns `nothing` only when *no* raw entry of
+any kind exists for the `(date, rx, tx)`.
+
+Amplitudes are stored in linear pT (use [`amplitude`](@ref) to view in µV/m or
+dB). `baseline_ns`/`baseline_ew` are optional reference-receiver phase
+[`RawDay`](@ref)s subtracted before stitching; where a baseline drops out,
+`params.slope` extrapolates the reference forward (see [`detrend_phase`](@ref)).
+With no baseline, `params.slope` linearly detrends.
 """
 function build_processed(c::VLFCache, source_folder::AbstractString, rx, tx, date::Date,
                          params::ProcessParams;
@@ -145,35 +321,57 @@ function build_processed(c::VLFCache, source_folder::AbstractString, rx, tx, dat
 
     ew_amp = raw(EW, AMPLITUDE)
     ns_amp = raw(NS, AMPLITUDE)
-    (ew_amp === nothing || ns_amp === nothing) &&
-        error("Missing amplitude data for $rxs←$txs on $date (need both EW and NS).")
-
-    Fs, Fc, tg = ew_amp.Fs, ew_amp.Fc, ew_amp.time
-    ew_amp_pT = calibrate(ew_amp, params)
-    ns_amp_pT = calibrate(ns_amp, params)
-    combined  = combine_quadrature(ns_amp_pT, ew_amp_pT)
-
     ew_pha = raw(EW, PHASE)
     ns_pha = raw(NS, PHASE)
-    ew_p = ew_pha === nothing ? fill(NaN, length(tg)) : copy(ew_pha.data)
-    ns_p = ns_pha === nothing ? fill(NaN, length(tg)) : copy(ns_pha.data)
 
-    baseline_ew !== nothing && (ew_p = clean_phase(ew_p, baseline_ew.data))
-    baseline_ns !== nothing && (ns_p = clean_phase(ns_p, baseline_ns.data))
+    # Derive the canonical grid from whichever entry exists (Fs/Fc/time match
+    # across channels of one tx-day). Nothing at all -> there is no data here.
+    template = ew_amp !== nothing ? ew_amp :
+               ns_amp !== nothing ? ns_amp :
+               ew_pha !== nothing ? ew_pha :
+               ns_pha !== nothing ? ns_pha : nothing
+    template === nothing && return nothing
+    Fs, Fc, tg = template.Fs, template.Fc, template.time
+    n = length(tg)
 
-    ew_stitched = stitch_phase(ew_p; tolerance = params.tolerance, unwrap = params.unwrap)
-    ns_stitched = stitch_phase(ns_p; tolerance = params.tolerance, unwrap = params.unwrap)
+    if ew_amp === nothing || ns_amp === nothing
+        missing_amps = String[]
+        ew_amp === nothing && push!(missing_amps, "EW")
+        ns_amp === nothing && push!(missing_amps, "NS")
+        @warn "Missing amplitude channel(s); amplitude/combined left as NaN \
+               (phase still processed where present)." rx=rxs tx=txs date missing=missing_amps
+    end
+
+    # Calibration only runs for channels that are present, so a present amplitude
+    # still requires calibration info while an absent one is simply NaN-filled.
+    ew_amp_pT   = ew_amp === nothing ? fill(NaN, n) : calibrate(ew_amp, params)
+    ns_amp_pT   = ns_amp === nothing ? fill(NaN, n) : calibrate(ns_amp, params)
+    combined_pT = combine_quadrature(ns_amp_pT, ew_amp_pT)   # NaN unless both exist
+
+    ew_p = ew_pha === nothing ? fill(NaN, n) : copy(ew_pha.data)
+    ns_p = ns_pha === nothing ? fill(NaN, n) : copy(ns_pha.data)
+
+    bew = baseline_ew === nothing ? nothing : baseline_ew.data
+    bns = baseline_ns === nothing ? nothing : baseline_ns.data
+
+    ew_stitched = _clean_detrend_stitch(ew_p, bew, params, tg)
+    ns_stitched = _clean_detrend_stitch(ns_p, bns, params, tg)
 
     return ProcessedDay(date, rxs, txs, Fc, Fs, tg,
-                        ew_amp_pT, ns_amp_pT, combined,
+                        ew_amp_pT, ns_amp_pT, combined_pT,
                         ew_stitched, ns_stitched, params)
 end
 
 """
     get_processed(cache, source_folder, rx, tx, date, params;
-                  recompute=false, baseline_ns=nothing, baseline_ew=nothing) -> ProcessedDay
+                  recompute=false, baseline_ns=nothing, baseline_ew=nothing) -> Union{ProcessedDay,Nothing}
 
-Load a cached [`ProcessedDay`](@ref) or build and cache one.
+Load a cached [`ProcessedDay`](@ref) or build and cache one. Returns `nothing`
+when no raw data exists for the `(date, rx, tx)`, so a loop over many days can
+simply skip the empty ones. Days missing an amplitude channel are built (NaN
+amplitude/combined, phase populated where present) and cached like any other
+product — an absent channel usually reflects a real, permanent gap in what the
+instrument recorded, so there is nothing to refresh.
 
 Unlike the raw tier, the processed product depends on `params`. With
 `recompute=false` a cached product is returned even if its stored provenance
@@ -197,6 +395,7 @@ function get_processed(c::VLFCache, source_folder::AbstractString, rx, tx, date:
     day = build_processed(c, source_folder, rx, tx, date, params;
                           baseline_ns = baseline_ns, baseline_ew = baseline_ew,
                           recompute = recompute)
+    day === nothing && return nothing
     _save_entry(processed_path(c, date, rx, tx), day)
     _index_add_processed!(c, date, rx, tx)
     return day

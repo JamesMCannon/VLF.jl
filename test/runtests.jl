@@ -214,6 +214,39 @@ end
     @test_throws ErrorException calibration_factor(amp, ProcessParams())  # neither cal supplied
 end
 
+@testset "process: per-channel cal_num (NamedTuple)" begin
+    g  = timegrid(1.0)
+    ew = RawDay(Date(2025,6,1), :FSI, :NLK, EW, AMPLITUDE, 24.8e3, 1.0, g, fill(2.0, length(g)))
+    ns = RawDay(Date(2025,6,1), :FSI, :NLK, NS, AMPLITUDE, 24.8e3, 1.0, g, fill(2.0, length(g)))
+
+    p = ProcessParams(cal_num = (EW = 3.0, NS = 5.0))
+    @test calibration_factor(ew, p) == 3.0
+    @test calibration_factor(ns, p) == 5.0
+    @test calibrate(ew, p)[1] == 6.0
+    @test calibrate(ns, p)[1] == 10.0
+
+    # scalar still applies to both channels
+    @test calibration_factor(ew, ProcessParams(cal_num = 4.0)) == 4.0
+    @test calibration_factor(ns, ProcessParams(cal_num = 4.0)) == 4.0
+
+    # a NamedTuple missing the channel's key errors
+    @test_throws ErrorException calibration_factor(ns, ProcessParams(cal_num = (EW = 3.0,)))
+end
+
+@testset "process: per-channel cal_num through build/get" begin
+    mktempdir() do dir
+        make_avid(dir; ch="EW", q="A", data=fill(3.0, 10))
+        make_avid(dir; ch="NS", q="A", data=fill(4.0, 10))
+        cache = VLFCache(dir)
+        day = get_processed(cache, dir, :FSI, :NLK, Date(2025,6,1),
+                            ProcessParams(cal_num = (EW = 2.0, NS = 10.0)))
+        @test day.EW_amp[5]       == 6.0                  # 3 * 2
+        @test day.NS_amp[5]       == 40.0                 # 4 * 10
+        @test day.combined_amp[5] == sqrt(6.0^2 + 40.0^2)
+        @test isfile(processed_path(cache, Date(2025,6,1), :FSI, :NLK))   # complete -> cached
+    end
+end
+
 @testset "process: combine_quadrature" begin
     @test combine_quadrature([3.0], [4.0]) == [5.0]
     @test isnan(combine_quadrature([NaN], [4.0])[1])
@@ -281,13 +314,189 @@ end
     end
 end
 
-@testset "process: missing amplitude errors" begin
+@testset "process: missing amplitude -> NaN + warn, phase preserved" begin
     mktempdir() do dir
-        make_avid(dir; ch="EW", q="A", data=ones(10))    # no NS amplitude
+        # NS amplitude absent; EW amplitude + both phase channels present
+        make_avid(dir; ch="EW", q="A", data=ones(10))
+        make_avid(dir; ch="EW", q="B", data=fill(30.0, 10))
+        make_avid(dir; ch="NS", q="B", data=fill(40.0, 10))
         cache = VLFCache(dir)
-        @test_throws ErrorException get_processed(
-            cache, dir, :FSI, :NLK, Date(2025,6,1), ProcessParams(cal_num=1.0))
+
+        day = @test_logs (:warn,) match_mode=:any get_processed(
+            cache, dir, :FSI, :NLK, Date(2025,6,1), ProcessParams(cal_num=2.0))
+
+        @test day isa ProcessedDay
+        @test day.EW_amp[5]   == 2.0            # present: 1 * 2
+        @test isnan(day.NS_amp[5])              # absent -> NaN
+        @test isnan(day.combined_amp[5])        # NaN unless both channels
+        @test day.EW_pha[5]   == 30.0           # phase still populated
+        @test day.NS_pha[5]   == 40.0
+        # missing channel usually reflects a permanent instrument gap, so the
+        # product is cached like any other.
+        @test isfile(processed_path(cache, Date(2025,6,1), :FSI, :NLK))
     end
+end
+
+@testset "process: no raw data -> get_processed returns nothing" begin
+    mktempdir() do dir
+        cache = VLFCache(dir)
+        @test get_processed(cache, dir, :FSI, :NLK, Date(2025,6,1),
+                            ProcessParams(cal_num=1.0)) === nothing
+    end
+end
+
+# ---------------------------------------------------------------------------
+@testset "process: amplitude units (µV/m, dB) — runtime conversion" begin
+    @test VLF.PT_TO_UVM ≈ 299.70 atol = 0.05
+    @test pT_to_uVm(2.0) ≈ 2.0 * VLF.PT_TO_UVM
+    let v = pT_to_uVm([1.0, NaN])
+        @test v[1] ≈ VLF.PT_TO_UVM
+        @test isnan(v[2])
+    end
+
+    @test to_db(10.0) == 20.0                 # 20*log10(10)
+    @test to_db(1.0)  == 0.0
+    @test isnan(to_db(NaN))
+    @test isnan(to_db(0.0))                   # non-positive -> NaN
+    @test isnan(to_db(-3.0))
+
+    # pure vector helper: default pT; efield -> µV/m; db -> dB; preserves NaN
+    @test apply_amplitude_units([6.0]) == [6.0]
+    @test apply_amplitude_units([6.0]; efield=true)[1] ≈ 6.0 * VLF.PT_TO_UVM
+    let v = apply_amplitude_units([10.0, NaN]; db=true)
+        @test v[1] == 20.0 && isnan(v[2])
+    end
+end
+
+@testset "process: cache stays pT, accessors convert at read time" begin
+    mktempdir() do dir
+        make_avid(dir; ch="EW", q="A", data=fill(3.0, 10))
+        make_avid(dir; ch="NS", q="A", data=fill(4.0, 10))
+        cache = VLFCache(dir)
+
+        d = get_processed(cache, dir, :FSI, :NLK, Date(2025,6,1),
+                          ProcessParams(cal_num=2.0))
+        # stored fields are linear pT
+        @test d.EW_amp[5]       == 6.0          # 3 * 2
+        @test d.combined_amp[5] == 10.0         # sqrt(6²+8²)
+
+        # accessors convert without touching the cache / needing recompute
+        @test amplitude(d, :EW)[5]              == 6.0
+        @test amplitude(d, :EW; efield=true)[5] ≈ 6.0 * VLF.PT_TO_UVM
+        @test amplitude(d, :combined; db=true)[5]            == 20*log10(10.0)
+        @test amplitude(d, :combined; efield=true, db=true)[5] ==
+              20*log10(10.0 * VLF.PT_TO_UVM)
+        @test isnan(amplitude(d, :EW; db=true)[20_000])
+        @test_throws ErrorException amplitude(d, :bogus)
+
+        all3 = amplitudes(d; efield=true)
+        @test all3.EW[5] ≈ 6.0 * VLF.PT_TO_UVM
+        @test all3.combined[5] ≈ 10.0 * VLF.PT_TO_UVM
+
+        # the cached struct is unchanged (still pT) after all those views
+        @test d.EW_amp[5] == 6.0
+    end
+end
+
+# ---------------------------------------------------------------------------
+@testset "process: detrend_phase (3a no-ref, 3b ref dropouts w/ anchor)" begin
+    t = [0.0, 1.0, 2.0, 3.0]
+
+    # 3a: no reference -> subtract slope*t everywhere
+    @test detrend_phase(fill(10.0, 4), nothing, 2.0, t) == [10.0, 8.0, 6.0, 4.0]
+    # 3a: slope=nothing -> unchanged (recovers current behavior)
+    @test detrend_phase(fill(10.0, 4), nothing, nothing, t) == fill(10.0, 4)
+    @test isequal(detrend_phase([10.0, NaN, 30.0], nothing, nothing, [0.0,1.0,2.0]),
+                  [10.0, NaN, 30.0])
+
+    # 3b: reference present with dropouts; gap fills extrapolate the reference
+    #     forward from its last valid value (continuous, no step at gap entry).
+    target = [10.0, 20.0, 30.0, 40.0]
+    ref    = [1.0, NaN, 3.0, NaN]
+    #  i=1: ref valid -> 10-1=9; anchor (t0=0, r0=1)
+    #  i=2: gap -> 20-(1+2*(1-0)) = 17
+    #  i=3: ref valid -> 30-3=27; anchor (t0=2, r0=3)
+    #  i=4: gap -> 40-(3+2*(3-2)) = 35
+    @test detrend_phase(target, ref, 2.0, t) == [9.0, 17.0, 27.0, 35.0]
+    # 3b: no slope -> NaN at the dropouts
+    @test isequal(detrend_phase(target, ref, nothing, t), [9.0, NaN, 27.0, NaN])
+    # target NaN where ref valid -> NaN regardless of slope
+    @test isequal(detrend_phase([10.0, NaN, 30.0], [1.0,2.0,3.0], 5.0, [0.0,1.0,2.0]),
+                  [9.0, NaN, 27.0])
+
+    # continuity entering a gap: a flat target/ref ramps by exactly -slope/sample
+    let out = detrend_phase(fill(100.0,4), [50.0,50.0,NaN,NaN], 2.0, [0.0,1.0,2.0,3.0])
+        @test out[1] == 50.0 && out[2] == 50.0
+        @test out[3] - out[2] == -2.0       # one step of the slope, no jump
+        @test out[4] - out[3] == -2.0
+    end
+
+    # leading gap (no anchor yet) -> detrend from origin (== 3a)
+    @test detrend_phase([10.0,20.0,30.0], [NaN,NaN,5.0], 2.0, [0.0,1.0,2.0]) ==
+          [10.0, 18.0, 25.0]
+
+    @test_throws DimensionMismatch detrend_phase([1.0,2.0], [1.0], nothing, [0.0,1.0])
+end
+
+@testset "process: slope detrend through build/get_processed" begin
+    mktempdir() do dir
+        make_avid(dir; ch="EW", q="A", data=fill(3.0, 10))
+        make_avid(dir; ch="NS", q="A", data=fill(4.0, 10))
+        make_avid(dir; ch="EW", q="B", data=fill(100.0, 10))
+        make_avid(dir; ch="NS", q="B", data=zeros(10))
+        cache = VLFCache(dir)
+
+        # 3a: no baseline, slope=10 deg/s detrends the (unwrapped) phase
+        day = get_processed(cache, dir, :FSI, :NLK, Date(2025,6,1),
+                            ProcessParams(cal_num=1.0, slope=10.0))
+        @test day.EW_pha[1]  == 100.0      # t=0
+        @test day.EW_pha[2]  == 90.0       # t=1 -> 100-10
+        @test day.EW_pha[10] == 10.0       # t=9 -> 100-90
+        @test isnan(day.EW_pha[11])
+
+        # default slope=nothing leaves phase untouched (recovers prior behavior)
+        day0 = get_processed(cache, dir, :FSI, :NLK, Date(2025,6,1),
+                             ProcessParams(cal_num=1.0); recompute=true)
+        @test day0.EW_pha[1] == 100.0 && day0.EW_pha[10] == 100.0
+
+        # 3b: baseline valid for samples 1..5 (R=50), dropout 6..10. Reference is
+        # extrapolated from R0=50 at t0=4s, so the fill is continuous with the
+        # cleaned value 50 (no +40 jump that an absolute detrend would produce).
+        g  = timegrid(1.0)
+        bl = fill(NaN, length(g)); bl[1:5] .= 50.0
+        base_ew = RawDay(Date(2025,6,1), :REF, :NLK, EW, PHASE, 24.8e3, 1.0, g, bl)
+
+        d3b = build_processed(cache, dir, :FSI, :NLK, Date(2025,6,1),
+                              ProcessParams(cal_num=1.0, slope=2.0, unwrap=false);
+                              baseline_ew = base_ew)
+        @test d3b.EW_pha[5]  == 50.0                     # 100 - 50 (baseline valid)
+        @test d3b.EW_pha[6]  == 100.0 - (50.0 + 2.0*(5-4))   # = 48, continuous
+        @test d3b.EW_pha[10] == 100.0 - (50.0 + 2.0*(9-4))   # = 40
+        @test d3b.EW_pha[6] - d3b.EW_pha[5] == -2.0      # no discontinuity at entry
+
+        # 3b with no slope -> NaN across the baseline dropout
+        d3b0 = build_processed(cache, dir, :FSI, :NLK, Date(2025,6,1),
+                               ProcessParams(cal_num=1.0, unwrap=false);
+                               baseline_ew = base_ew)
+        @test d3b0.EW_pha[5] == 50.0
+        @test isnan(d3b0.EW_pha[6]) && isnan(d3b0.EW_pha[10])
+    end
+end
+
+@testset "process: provenance includes slope (units excluded)" begin
+    base = ProcessParams(cal_num=2.0)
+    @test VLF.provenance_matches(base, ProcessParams(cal_num=2.0))
+    @test !VLF.provenance_matches(base, ProcessParams(cal_num=2.0, slope=0.0))  # nothing ≠ 0.0
+    @test !VLF.provenance_matches(ProcessParams(slope=1.0), ProcessParams(slope=2.0))
+    @test VLF.provenance_matches(ProcessParams(slope=1.0), ProcessParams(slope=1.0))
+
+    # per-channel cal_num: scalar vs NamedTuple differ; NamedTuples compare field-wise
+    @test !VLF.provenance_matches(ProcessParams(cal_num=2.0),
+                                  ProcessParams(cal_num=(EW=2.0, NS=2.0)))
+    @test VLF.provenance_matches(ProcessParams(cal_num=(EW=2.0, NS=3.0)),
+                                 ProcessParams(cal_num=(EW=2.0, NS=3.0)))
+    @test !VLF.provenance_matches(ProcessParams(cal_num=(EW=2.0, NS=3.0)),
+                                  ProcessParams(cal_num=(EW=2.0, NS=4.0)))
 end
 
 end # @testset "VLF.jl"
