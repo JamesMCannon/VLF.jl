@@ -255,16 +255,43 @@ Remove ±360° wraps so successive samples differ by < 180°. Operates on a copy
 (the old in-place version returned its mutated input). NaN samples are left
 untouched and do not corrupt the running value.
 """
-function unwrap_phase(phase::AbstractVector)
+function unwrap_phase(phase::AbstractVector;
+                      slope::Union{Nothing,Real} = nothing,
+                      time::Union{Nothing,AbstractVector} = nothing,
+                      max_gap::Real = Inf)
     out = collect(float.(phase))
-    @inbounds for i in 2:length(out)
-        d = out[i] - out[i-1]
-        isnan(d) && continue
-        if d > 180
-            out[i] -= 360 * ceil((d - 180) / 360)
-        elseif d < -180
-            out[i] += 360 * ceil((-d - 180) / 360)
+
+    # Original datum-resetting behavior, preserved exactly when no anchor given.
+    if slope === nothing
+        @inbounds for i in 2:length(out)
+            d = out[i] - out[i-1]
+            isnan(d) && continue
+            if d > 180
+                out[i] -= 360 * ceil((d - 180) / 360)
+            elseif d < -180
+                out[i] += 360 * ceil((-d - 180) / 360)
+            end
         end
+        return out
+    end
+
+    # Anchored: fold each valid sample toward the drift-extrapolated prediction
+    # from the last valid sample, so a gap no longer resets the datum. Gaps
+    # longer than `max_gap` are NOT folded (extrapolation untrustworthy) — the
+    # datum resets there, recovering the old behavior for long dropouts.
+    time === nothing && throw(ArgumentError("anchored unwrap (slope set) needs `time`"))
+    length(time) == length(out) ||
+        throw(DimensionMismatch("time length $(length(time)) ≠ phase length $(length(out))"))
+    s = float(slope)
+    prev_v = nothing; prev_t = 0.0
+    @inbounds for i in eachindex(out)
+        isnan(out[i]) && continue
+        if prev_v === nothing || (float(time[i]) - prev_t) > max_gap
+            prev_v = out[i]; prev_t = float(time[i]); continue   # datum origin / reset
+        end
+        pred = prev_v + s * (float(time[i]) - prev_t)
+        out[i] += 360 * round((pred - out[i]) / 360)
+        prev_v = out[i]; prev_t = float(time[i])
     end
     return out
 end
@@ -392,12 +419,12 @@ end
 # Unwrapping happens here so the slope detrends the UNWRAPPED phase; stitch then
 # runs with unwrap already done. With slope === nothing and no baseline this
 # reduces exactly to the previous `stitch_phase(target; unwrap=params.unwrap)`.
-function _clean_detrend_stitch(target::AbstractVector,
-                               baseline::Union{Nothing,AbstractVector},
-                               params::ProcessParams, time::AbstractVector)
-    tgt  = params.unwrap ? unwrap_phase(target) : collect(float.(target))
-    base = baseline === nothing ? nothing :
-           (params.unwrap ? unwrap_phase(baseline) : baseline)
+function _clean_detrend_stitch(target, baseline, params, time)
+    uw(v) = params.unwrap ? unwrap_phase(v; slope = params.slope, time = time,
+                                          max_gap = params.max_gap) :
+                            collect(float.(v))
+    tgt     = uw(target)
+    base    = baseline === nothing ? nothing : uw(baseline)
     cleaned = detrend_phase(tgt, base, params.slope, time)
     return stitch_phase(cleaned; tolerance = params.tolerance, unwrap = false)
 end

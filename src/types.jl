@@ -29,8 +29,11 @@ Bumped 2 → 3: [`ProcessParams`](@ref) `cal_num` widened from `Float64` to
 `Union{Float64,NamedTuple}` to allow per-channel calibration (`cal_num =
 (EW = a, NS = b)`). Since `ProcessParams` is serialized inside every cached
 [`ProcessedDay`](@ref), v2 entries are rebuilt rather than reinterpreted.
+
+Bumped 3 → 4: [`ProcessParams`](@ref) gained a `max_gap` field to control
+phase unwrapping across long gaps. 
 """
-const SCHEMA_VERSION = 3
+const SCHEMA_VERSION = 4
 
 """
     Channel
@@ -135,19 +138,20 @@ Phase:
 """
 Base.@kwdef struct ProcessParams
     cal_file::String   = ""
-    cal_num::Union{Float64,NamedTuple} = -1.0
+    cal_num::Float64   = -1.0
     tolerance::Float64 = 10.0
     unwrap::Bool       = true
     baseline::String   = ""
     slope::Union{Nothing,Float64} = nothing
+    max_gap::Float64   = 3600      # s; gaps longer than this reset datum (no fold)
 end
 
 "True if two parameter sets would produce the same product."
 provenance_matches(a::ProcessParams, b::ProcessParams) =
     a.cal_file == b.cal_file && a.cal_num == b.cal_num &&
     a.tolerance == b.tolerance && a.unwrap == b.unwrap &&
-    a.baseline == b.baseline && a.slope == b.slope
-
+    a.baseline == b.baseline && a.slope == b.slope &&
+    a.max_gap == b.max_gap
 # ----------------------------------------------------------------------------
 # RawDay
 # ----------------------------------------------------------------------------
