@@ -423,9 +423,17 @@ function _clean_detrend_stitch(target, baseline, params, time)
     uw(v) = params.unwrap ? unwrap_phase(v; slope = params.slope, time = time,
                                           max_gap = params.max_gap) :
                             collect(float.(v))
-    tgt     = uw(target)
-    base    = baseline === nothing ? nothing : uw(baseline)
-    cleaned = detrend_phase(tgt, base, params.slope, time)
+    tgt  = uw(target)
+    base = baseline === nothing ? nothing : uw(baseline)
+
+    # Stitch the baseline independently before subtraction. This catches quarter
+    # artifacts at baseline-only gap boundaries, which survive into cleaned as
+    # steps between valid samples (no NaN in cleaned → post-subtraction stitch
+    # never fires there). Same tolerance as the target pass.
+    base_s = base === nothing ? nothing :
+             stitch_phase(base; tolerance = params.tolerance, unwrap = false)
+
+    cleaned = detrend_phase(tgt, base_s, params.slope, time)
     return stitch_phase(cleaned; tolerance = params.tolerance, unwrap = false)
 end
 

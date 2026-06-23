@@ -99,7 +99,7 @@ Base.hash(k::DataKey, h::UInt) =
 # ----------------------------------------------------------------------------
 """
     ProcessParams(; cal_file="", cal_num=-1.0, tolerance=10.0, unwrap=true,
-                    baseline="", slope=nothing)
+                    baseline="", slope=nothing, max_gap=3600)
 
 Settings that determine a [`ProcessedDay`](@ref). Stored as provenance so a
 cached product can be checked against the parameters requested on load. The
@@ -123,6 +123,7 @@ Phase:
 - `tolerance::Float64 = 10.0` — ± window (deg) for n×90° phase-jump stitching.
 - `unwrap::Bool = true` — whether phase is unwrapped before detrend/stitch.
 - `baseline::String = ""` — provenance label for the phase baseline, or `""`.
+- `max_gap::Float64 = 3600` — maximum gap length (s) for phase unwrapping.
 - `slope::Union{Nothing,Float64} = nothing` — linear phase-detrend rate (deg/s).
   See [`detrend_phase`](@ref): with no reference baseline it detrends every
   sample as `slope · t` (`t` = seconds-from-midnight; `nothing` ⇒ no detrend,
@@ -138,7 +139,7 @@ Phase:
 """
 Base.@kwdef struct ProcessParams
     cal_file::String   = ""
-    cal_num::Float64   = -1.0
+    cal_num::Union{Float64,NamedTuple} = -1.0
     tolerance::Float64 = 10.0
     unwrap::Bool       = true
     baseline::String   = ""
