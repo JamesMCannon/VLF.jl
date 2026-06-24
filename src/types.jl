@@ -32,8 +32,13 @@ Bumped 2 → 3: [`ProcessParams`](@ref) `cal_num` widened from `Float64` to
 
 Bumped 3 → 4: [`ProcessParams`](@ref) gained a `max_gap` field to control
 phase unwrapping across long gaps. 
+
+Bumped 4 → 5: ProcessParams gained transmitter-dropout fields (dropout_db,
+dropout_window, dropout_pad, dropout_min_valid). The phase/amplitude pipeline
+now NaN-masks dropouts detected on a near-field baseline amplitude, changing the
+stored product, so v4 entries are rebuilt rather than reinterpreted.
 """
-const SCHEMA_VERSION = 4
+const SCHEMA_VERSION = 5
 
 """
     Channel
@@ -145,6 +150,10 @@ Base.@kwdef struct ProcessParams
     baseline::String   = ""
     slope::Union{Nothing,Float64} = nothing
     max_gap::Float64   = 3600      # s; gaps longer than this reset datum (no fold)
+    dropout_db::Union{Nothing,Float64} = nothing   # dB below trailing median to flag a drop; nothing ⇒ off
+    dropout_window::Float64 = 300.0                # trailing rolling-median window (s)
+    dropout_pad::Float64    = 1.0                  # dilation each side of a flagged run (s)
+    dropout_min_valid::Int  = 30                # minimum valid samples in a window to compute median
 end
 
 "True if two parameter sets would produce the same product."
@@ -152,7 +161,9 @@ provenance_matches(a::ProcessParams, b::ProcessParams) =
     a.cal_file == b.cal_file && a.cal_num == b.cal_num &&
     a.tolerance == b.tolerance && a.unwrap == b.unwrap &&
     a.baseline == b.baseline && a.slope == b.slope &&
-    a.max_gap == b.max_gap
+    a.max_gap == b.max_gap &&
+    a.dropout_db == b.dropout_db && a.dropout_window == b.dropout_window &&
+    a.dropout_pad == b.dropout_pad && a.dropout_min_valid == b.dropout_min_valid
 # ----------------------------------------------------------------------------
 # RawDay
 # ----------------------------------------------------------------------------

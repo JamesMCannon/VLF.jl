@@ -577,4 +577,46 @@ end
     end
 end
 
+@testset "network-coherence dropouts" begin
+    Fs, N = 1.0, 400
+    tg = range(0.0; step = 1/Fs, length = N)
+    mkamp(v) = RawDay(Date(2025,5,25), :RX, :NLK, EW, AMPLITUDE, 24.8e3, Fs, tg, v)
+
+    base() = fill(100.0, N)                 # 40 dB everywhere
+    drop!(v, r) = (v[r] .= 1.0; v)          # 0 dB → 40 dB drop, ≫ 10 dB
+
+    # Three receivers, a coincident drop at 200:209.
+    a = drop!(base(), 200:209); b = drop!(base(), 200:209); c = drop!(base(), 200:209)
+    # Receiver `a` also has a lone fade at 300:304 the others lack.
+    drop!(a, 300:304)
+    d1, d2, d3 = mkamp(a), mkamp(b), mkamp(c)
+
+    kw = (; drop_db = 10.0, window_s = 120.0, pad_s = 1.0, min_valid = 30)
+
+    r = VLF.detect_dropouts_network([d1, d2, d3]; kw...)
+    @test any(rng -> 200 in rng && 209 in rng, r)         # coincident drop caught
+    @test !any(rng -> 300 in rng, r)                       # lone fade rejected (unanimous)
+
+    # Integer override: one path now suffices, so the lone fade is caught.
+    r1 = VLF.detect_dropouts_network([d1, d2, d3]; kw..., min_coincident = 1)
+    @test any(rng -> 300 in rng, r1)
+
+    # Blind-spot coverage: third receiver entirely down (NaN) must not block the
+    # coincident drop seen by the two that are up.
+    ddn = mkamp(fill(NaN, N))
+    rdn = VLF.detect_dropouts_network([d2, d3, ddn]; kw..., min_receivers = 2)
+    @test any(rng -> 200 in rng, rdn)
+
+    # Grid mismatch is an error, not a silent drop.
+    short = RawDay(Date(2025,5,25), :RX2, :NLK, EW, AMPLITUDE, 24.8e3, Fs,
+                   range(0.0; step = 1/Fs, length = N - 1), base()[1:N-1])
+    @test_throws ErrorException VLF.detect_dropouts_network([d2, short]; kw...)
+
+    # Wrapper masks the passed days over the detected ranges; inputs untouched.
+    out = VLF.mask_dropouts_network([d1, d2, d3]; kw...)
+    @test out.ranges == r
+    @test all(isnan, out.days[1].data[200:209])
+    @test isequal(d1.data, a)                              # original not mutated
+end
+
 end # @testset "VLF.jl"

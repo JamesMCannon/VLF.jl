@@ -29,5 +29,6 @@ export amplitude, amplitudes
 export unwrap_phase, stitch_phase, clean_phase, detrend_phase
 export build_processed, get_processed, get_processed_view
 export ProcessedView, AmplitudeUnits, view_units, unit_label
+export detect_dropouts, mask_dropouts, detect_dropouts_network, mask_dropouts_network
 
 end # module VLF

@@ -437,6 +437,196 @@ function _clean_detrend_stitch(target, baseline, params, time)
     return stitch_phase(cleaned; tolerance = params.tolerance, unwrap = false)
 end
 
+# NaN-aware median of a small buffer (sorts a copy). Order-preserving, so
+# median(dB) == dB(median): the dB/linear choice is irrelevant to the reference.
+function _nanmedian(vals::AbstractVector{<:Real})
+    isempty(vals) && return NaN
+    s = sort(vals); n = length(s)
+    return isodd(n) ? s[(n+1)÷2] : 0.5 * (s[n÷2] + s[n÷2 + 1])
+end
+
+# Per-sample drop flagging, factored out so the single-receiver and network
+# detectors share one definition. Returns (flagged, eligible):
+#   eligible[i] = sample i is valid AND its trailing window has ≥ min_valid valids
+#                 (i.e. i is allowed to "vote"); a NaN sample or a thin window abstains.
+#   flagged[i]  = eligible[i] AND adb[i] is > drop_db below the trailing-window median.
+function _flag_drops(adb::AbstractVector, Fs::Real;
+                     drop_db::Real, window_s::Real, min_valid::Integer)
+    n = length(adb)
+    w = max(1, round(Int, window_s * Fs))
+    flagged  = falses(n)
+    eligible = falses(n)
+    buf = Float64[]
+    @inbounds for i in 1:n
+        isnan(adb[i]) && continue
+        empty!(buf)
+        for j in max(1, i - w + 1):i
+            x = adb[j]; isnan(x) || push!(buf, x)
+        end
+        length(buf) < min_valid && continue
+        eligible[i] = true
+        adb[i] < _nanmedian(buf) - drop_db && (flagged[i] = true)
+    end
+    return flagged, eligible
+end
+
+# Contiguous flagged runs → dilated, merged 1-based index ranges (pad in samples).
+function _ranges_from_flags(flagged::AbstractVector{Bool}, pad::Integer)
+    n = length(flagged)
+    ranges = UnitRange{Int}[]
+    i = 1
+    while i <= n
+        if flagged[i]
+            j = i; while j < n && flagged[j + 1]; j += 1; end
+            lo = max(1, i - pad); hi = min(n, j + pad)
+            if !isempty(ranges) && lo <= ranges[end].stop + 1
+                ranges[end] = ranges[end].start:max(ranges[end].stop, hi)
+            else
+                push!(ranges, lo:hi)
+            end
+            i = j + 1
+        else
+            i += 1
+        end
+    end
+    return ranges
+end
+
+"""
+    detect_dropouts(baseline_amp::RawDay; drop_db=10.0, window_s=300.0,
+                    pad_s=1.0, min_valid=30) -> Vector{UnitRange{Int}}
+
+Single-receiver transmitter-dropout detection on a near-field baseline amplitude
+(see module notes). Unchanged in behavior; now expressed over [`_flag_drops`](@ref)
+and [`_ranges_from_flags`](@ref), which it shares with [`detect_dropouts_network`](@ref).
+"""
+function detect_dropouts(baseline_amp::RawDay; drop_db::Real = 10.0,
+                         window_s::Real = 300.0, pad_s::Real = 1.0,
+                         min_valid::Integer = 30)
+    adb = to_db.(baseline_amp.data)
+    flagged, _ = _flag_drops(adb, baseline_amp.Fs;
+                             drop_db = drop_db, window_s = window_s,
+                             min_valid = min_valid)
+    return _ranges_from_flags(flagged, round(Int, pad_s * baseline_amp.Fs))
+end
+
+"""
+    detect_dropouts_network(days::AbstractVector{RawDay}; drop_db=10.0,
+                            window_s=300.0, pad_s=1.0, min_valid=30,
+                            min_coincident=nothing, min_receivers=2)
+        -> Vector{UnitRange{Int}}
+
+Detect transmitter power-dropouts by *coincidence* across a network of receivers
+that all observe the same transmitter on the same date. Each receiver's amplitude
+is flagged independently with the same trailing-relative-drop test as
+[`detect_dropouts`](@ref); a sample is then declared a network dropout when enough
+*eligible* receivers (those recording with a sufficient trailing window at that
+sample — see [`_flag_drops`](@ref)) flag it simultaneously. Flagged runs are
+dilated by `pad_s` and merged. The returned ranges are on the shared grid and
+mask every co-registered product of every receiver.
+
+Coincidence rule:
+- `min_coincident === nothing` (default): **unanimous** — every eligible receiver
+  at that sample must flag, and at least `min_receivers` must be eligible.
+  Receivers that are not recording (NaN) or whose window is too thin are excluded
+  from the denominator, so a down receiver neither blocks nor triggers detection.
+- `min_coincident::Integer`: require at least that many receivers to flag,
+  regardless of how many are eligible (`min_receivers` is then unused).
+
+All receivers must share `Fs` and grid length; a mismatch is an error rather than
+a silent drop, because dropping a receiver would change the coincidence denominator
+without warning. A non-`AMPLITUDE` input warns but is not rejected (the test is
+relative per receiver).
+
+!!! warning "Epistemic status"
+    This is a *backstop* for when the near-field baseline is unavailable. Unlike
+    the ground-wave baseline, far-field amplitudes are subject to ionospheric
+    fades, and a solar flare (SID) can drive coherent drops across many paths of a
+    transmitter near-simultaneously — so a coincident drop is *consistent with* but
+    not *proof of* a transmitter power-down. Discriminators not exploited here:
+    depth (a power-down reaches the noise floor, typically ≫ 10 dB), onset sharpness
+    (a switch is a sub-second step; an SID ramps over tens of seconds), and cross-TX
+    independence (a power-down spares other transmitters' paths; an SID does not).
+    Consider a deeper `drop_db` than the near-field default to suppress flare/fade
+    false positives. False positives delete a real simultaneous sample across the
+    whole network, so bias conservative.
+"""
+function detect_dropouts_network(days::AbstractVector{RawDay};
+                                 drop_db::Real = 10.0, window_s::Real = 300.0,
+                                 pad_s::Real = 1.0, min_valid::Integer = 30,
+                                 min_coincident::Union{Nothing,Integer} = nothing,
+                                 min_receivers::Integer = 2)
+    isempty(days) && return UnitRange{Int}[]
+    min_coincident === nothing || min_coincident >= 1 ||
+        throw(ArgumentError("min_coincident must be ≥ 1 (got $min_coincident)"))
+    mr = max(1, min_receivers)
+
+    Fs = days[1].Fs
+    n  = length(days[1].data)
+    for d in days
+        d.quantity == AMPLITUDE ||
+            @warn "detect_dropouts_network: expected AMPLITUDE." rx=d.rx quantity=d.quantity
+        (isapprox(d.Fs, Fs; rtol = 1e-9) && length(d.data) == n) ||
+            error("detect_dropouts_network: receiver $(d.rx) grid (Fs=$(d.Fs), \
+                   n=$(length(d.data))) ≠ reference (Fs=$Fs, n=$n). All receivers \
+                   must share the canonical grid.")
+    end
+
+    R = length(days)
+    flags = Vector{BitVector}(undef, R)
+    elig  = Vector{BitVector}(undef, R)
+    for r in 1:R
+        flags[r], elig[r] = _flag_drops(to_db.(days[r].data), Fs;
+                                        drop_db = drop_db, window_s = window_s,
+                                        min_valid = min_valid)
+    end
+
+    coincident = falses(n)
+    @inbounds for i in 1:n
+        e = 0; f = 0
+        for r in 1:R
+            elig[r][i]  && (e += 1)
+            flags[r][i] && (f += 1)
+        end
+        coincident[i] = min_coincident === nothing ? (e >= mr && f == e) :
+                                                      (f >= min_coincident)
+    end
+    return _ranges_from_flags(coincident, round(Int, pad_s * Fs))
+end
+
+"""
+    mask_dropouts_network(days; kwargs...) -> (; ranges, days)
+
+Run [`detect_dropouts_network`](@ref) over `days`, then return the detected
+`ranges` together with a vector of the input days each NaN-masked over those
+ranges (via [`mask_dropouts`](@ref); inputs are not mutated). `kwargs` are passed
+through to the detector. To also notch phase (or the other channel), reuse
+`ranges`: `mask_dropouts(phase_rawday, ranges)`.
+"""
+function mask_dropouts_network(days::AbstractVector{RawDay}; kwargs...)
+    ranges = detect_dropouts_network(days; kwargs...)
+    return (ranges = ranges, days = [mask_dropouts(d, ranges) for d in days])
+end
+
+"""
+    mask_dropouts(day::RawDay, ranges) -> RawDay
+
+Copy of `day` with `data[r] .= NaN` for each range in `ranges`. Does not mutate
+`day` — raw stays faithful to the source `.mat`; the NaNs live only in the copy
+fed forward into processing.
+"""
+function mask_dropouts(day::RawDay, ranges)
+    d = copy(day.data)
+    for r in ranges
+        @views d[r] .= NaN
+    end
+    return RawDay(day.date, day.rx, day.tx, day.channel, day.quantity,
+                  day.Fc, day.Fs, day.time, d)
+end
+
+"NaN the given index ranges of `v` in place; returns `v`."
+_mask_ranges!(v::AbstractVector, ranges) = (for r in ranges; @views v[r] .= NaN; end; v)
+
 # --- build / get ProcessedDay ----------------------------------------------
 """
     build_processed(cache, source_folder, rx, tx, date, params;
@@ -460,6 +650,7 @@ function build_processed(c::VLFCache, source_folder::AbstractString, rx, tx, dat
                          params::ProcessParams;
                          baseline_ns::Union{Nothing,RawDay} = nothing,
                          baseline_ew::Union{Nothing,RawDay} = nothing,
+                         baseline_amp::Union{Nothing,RawDay} = nothing,
                          recompute::Bool = false)
     rxs, txs = Symbol(rx), Symbol(tx)
     key(ch, q) = DataKey(date, rxs, txs, ch, q)
@@ -470,8 +661,6 @@ function build_processed(c::VLFCache, source_folder::AbstractString, rx, tx, dat
     ew_pha = raw(EW, PHASE)
     ns_pha = raw(NS, PHASE)
 
-    # Derive the canonical grid from whichever entry exists (Fs/Fc/time match
-    # across channels of one tx-day). Nothing at all -> there is no data here.
     template = ew_amp !== nothing ? ew_amp :
                ns_amp !== nothing ? ns_amp :
                ew_pha !== nothing ? ew_pha :
@@ -488,17 +677,43 @@ function build_processed(c::VLFCache, source_folder::AbstractString, rx, tx, dat
                (phase still processed where present)." rx=rxs tx=txs date missing=missing_amps
     end
 
-    # Calibration only runs for channels that are present, so a present amplitude
-    # still requires calibration info while an absent one is simply NaN-filled.
-    ew_amp_pT   = ew_amp === nothing ? fill(NaN, n) : calibrate(ew_amp, params)
-    ns_amp_pT   = ns_amp === nothing ? fill(NaN, n) : calibrate(ns_amp, params)
-    combined_pT = combine_quadrature(ns_amp_pT, ew_amp_pT)   # NaN unless both exist
+    ew_amp_pT = ew_amp === nothing ? fill(NaN, n) : calibrate(ew_amp, params)
+    ns_amp_pT = ns_amp === nothing ? fill(NaN, n) : calibrate(ns_amp, params)
 
     ew_p = ew_pha === nothing ? fill(NaN, n) : copy(ew_pha.data)
     ns_p = ns_pha === nothing ? fill(NaN, n) : copy(ns_pha.data)
 
-    bew = baseline_ew === nothing ? nothing : baseline_ew.data
-    bns = baseline_ns === nothing ? nothing : baseline_ns.data
+    # Copy baseline phase so masking/processing never mutates the caller's (or
+    # the cached) RawDay arrays.
+    bew = baseline_ew === nothing ? nothing : copy(baseline_ew.data)
+    bns = baseline_ns === nothing ? nothing : copy(baseline_ns.data)
+
+    # --- transmitter-dropout masking (raw untouched) ------------------------
+    # Detect power-dropouts on the near-field baseline amplitude and NaN those
+    # intervals in BOTH amplitude and phase of the target, and in the baseline
+    # phase — the dropout is a transmitter event, so it corrupts the baseline's
+    # phase tracking too. The induced NaN gaps let stitch_phase catch the n×90°
+    # cycle slips that loss-of-lock leaves behind.
+    if params.dropout_db !== nothing
+        if baseline_amp === nothing
+            @warn "dropout_db set but no baseline_amp given — dropout masking skipped." rx=rxs tx=txs date
+        elseif !isapprox(baseline_amp.Fs, Fs; rtol = 1e-9) || length(baseline_amp.data) != n
+            @warn "baseline_amp grid ≠ target grid — dropout masking skipped." rx=rxs tx=txs date
+        else
+            ranges = detect_dropouts(baseline_amp;
+                                     drop_db   = params.dropout_db,
+                                     window_s  = params.dropout_window,
+                                     pad_s     = params.dropout_pad,
+                                     min_valid = params.dropout_min_valid)
+            for v in (ew_amp_pT, ns_amp_pT, ew_p, ns_p)
+                _mask_ranges!(v, ranges)
+            end
+            bew === nothing || _mask_ranges!(bew, ranges)
+            bns === nothing || _mask_ranges!(bns, ranges)
+        end
+    end
+
+    combined_pT = combine_quadrature(ns_amp_pT, ew_amp_pT)   # NaN where either masked
 
     ew_stitched = _clean_detrend_stitch(ew_p, bew, params, tg)
     ns_stitched = _clean_detrend_stitch(ns_p, bns, params, tg)
@@ -528,7 +743,8 @@ change is visible rather than silent.
 function get_processed(c::VLFCache, source_folder::AbstractString, rx, tx, date::Date,
                        params::ProcessParams; recompute::Bool = false,
                        baseline_ns::Union{Nothing,RawDay} = nothing,
-                       baseline_ew::Union{Nothing,RawDay} = nothing)
+                       baseline_ew::Union{Nothing,RawDay} = nothing,
+                       baseline_amp::Union{Nothing,RawDay} = nothing)
     if !recompute
         cached = _load_entry(processed_path(c, date, rx, tx))
         if cached isa ProcessedDay
@@ -540,7 +756,7 @@ function get_processed(c::VLFCache, source_folder::AbstractString, rx, tx, date:
     end
     day = build_processed(c, source_folder, rx, tx, date, params;
                           baseline_ns = baseline_ns, baseline_ew = baseline_ew,
-                          recompute = recompute)
+                          baseline_amp = baseline_amp, recompute = recompute)
     day === nothing && return nothing
     _save_entry(processed_path(c, date, rx, tx), day)
     _index_add_processed!(c, date, rx, tx)
@@ -562,8 +778,10 @@ function get_processed_view(c::VLFCache, source_folder::AbstractString, rx, tx, 
                             params::ProcessParams; efield::Bool = false, db::Bool = false,
                             recompute::Bool = false,
                             baseline_ns::Union{Nothing,RawDay} = nothing,
-                            baseline_ew::Union{Nothing,RawDay} = nothing)
+                            baseline_ew::Union{Nothing,RawDay} = nothing,
+                            baseline_amp::Union{Nothing,RawDay} = nothing)
     day = get_processed(c, source_folder, rx, tx, date, params;
-                        recompute = recompute, baseline_ns = baseline_ns, baseline_ew = baseline_ew)
+                        recompute = recompute, baseline_ns = baseline_ns,
+                        baseline_ew = baseline_ew, baseline_amp = baseline_amp)
     return day === nothing ? nothing : view_units(day; efield = efield, db = db)
 end
