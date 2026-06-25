@@ -27,7 +27,8 @@ export calibrate, calibration_factor, combine_quadrature
 export pT_to_uVm, to_db, apply_amplitude_units, PT_TO_UVM
 export amplitude, amplitudes
 export unwrap_phase, stitch_phase, clean_phase, detrend_phase
-export build_processed, get_processed, get_processed_view
+export build_processed, get_processed, get_processed_view, get_processed_network
+export NetworkJob, network_dropout_label 
 export ProcessedView, AmplitudeUnits, view_units, unit_label
 export detect_dropouts, mask_dropouts, detect_dropouts_network, mask_dropouts_network
 

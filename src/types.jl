@@ -37,8 +37,13 @@ Bumped 4 → 5: ProcessParams gained transmitter-dropout fields (dropout_db,
 dropout_window, dropout_pad, dropout_min_valid). The phase/amplitude pipeline
 now NaN-masks dropouts detected on a near-field baseline amplitude, changing the
 stored product, so v4 entries are rebuilt rather than reinterpreted.
+
+Bumped 5 → 6: ProcessParams gained `dropout_label`, a provenance string identifying
+externally-supplied dropout ranges (e.g. a network-coincidence mask) that are not
+otherwise reproducible from the other fields. It changes the provenance identity of
+a cached product, so v5 entries are rebuilt rather than reinterpreted.
 """
-const SCHEMA_VERSION = 5
+const SCHEMA_VERSION = 6
 
 """
     Channel
@@ -136,6 +141,11 @@ Phase:
   valid, the reference is *extrapolated* from its last valid value at this slope
   so the result stays continuous (`nothing` ⇒ `NaN` across the dropout).
 
+- `dropout_label::String = ""` — provenance for dropout ranges supplied to
+  [`build_processed`](@ref) via `dropout_ranges` (e.g. from
+  [`detect_dropouts_network`](@ref)). Caller-asserted: it labels the mask source
+  so the cache can distinguish products, but is not verified against the ranges.
+  
 !!! note
     `slope` IS baked into the cached [`ProcessedDay`](@ref) (it changes the phase
     product), so changing it requires `recompute=true` in [`get_processed`](@ref);
@@ -154,6 +164,7 @@ Base.@kwdef struct ProcessParams
     dropout_window::Float64 = 300.0                # trailing rolling-median window (s)
     dropout_pad::Float64    = 1.0                  # dilation each side of a flagged run (s)
     dropout_min_valid::Int  = 30                # minimum valid samples in a window to compute median
+    dropout_label::String   = ""                # provenance for externally-applied dropout ranges (e.g. a network mask); "" ⇒ none
 end
 
 "True if two parameter sets would produce the same product."
@@ -163,7 +174,8 @@ provenance_matches(a::ProcessParams, b::ProcessParams) =
     a.baseline == b.baseline && a.slope == b.slope &&
     a.max_gap == b.max_gap &&
     a.dropout_db == b.dropout_db && a.dropout_window == b.dropout_window &&
-    a.dropout_pad == b.dropout_pad && a.dropout_min_valid == b.dropout_min_valid
+    a.dropout_pad == b.dropout_pad && a.dropout_min_valid == b.dropout_min_valid &&
+    a.dropout_label == b.dropout_label
 # ----------------------------------------------------------------------------
 # RawDay
 # ----------------------------------------------------------------------------

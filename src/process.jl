@@ -595,6 +595,25 @@ function detect_dropouts_network(days::AbstractVector{RawDay};
 end
 
 """
+    network_dropout_label(amps; drop_db, window_s, pad_s, min_valid,
+                          min_coincident, min_receivers) -> String
+
+Deterministic provenance label for a [`detect_dropouts_network`](@ref) mask: the
+sorted contributing receiver codes plus the coincidence settings. Pass the result
+as `ProcessParams(...; dropout_label=…)` alongside the same network's ranges so the
+cache can tell network-masked products apart. Derive the label and the ranges from
+the *same* `amps` and keyword values to keep them consistent.
+"""
+function network_dropout_label(amps::AbstractVector{RawDay};
+                               drop_db, window_s, pad_s, min_valid,
+                               min_coincident, min_receivers)
+    rxs = join(sort([string(a.rx) for a in amps]), ",")
+    mc  = min_coincident === nothing ? "all" : string(min_coincident)
+    return "network[$rxs];db=$drop_db,win=$window_s,pad=$pad_s," *
+           "mv=$min_valid,mc=$mc,mr=$min_receivers"
+end
+
+"""
     mask_dropouts_network(days; kwargs...) -> (; ranges, days)
 
 Run [`detect_dropouts_network`](@ref) over `days`, then return the detected
@@ -624,9 +643,6 @@ function mask_dropouts(day::RawDay, ranges)
                   day.Fc, day.Fs, day.time, d)
 end
 
-"NaN the given index ranges of `v` in place; returns `v`."
-_mask_ranges!(v::AbstractVector, ranges) = (for r in ranges; @views v[r] .= NaN; end; v)
-
 # --- build / get ProcessedDay ----------------------------------------------
 """
     build_processed(cache, source_folder, rx, tx, date, params;
@@ -651,6 +667,7 @@ function build_processed(c::VLFCache, source_folder::AbstractString, rx, tx, dat
                          baseline_ns::Union{Nothing,RawDay} = nothing,
                          baseline_ew::Union{Nothing,RawDay} = nothing,
                          baseline_amp::Union{Nothing,RawDay} = nothing,
+                         dropout_ranges::Union{Nothing,Vector{UnitRange{Int}}} = nothing,
                          recompute::Bool = false)
     rxs, txs = Symbol(rx), Symbol(tx)
     key(ch, q) = DataKey(date, rxs, txs, ch, q)
@@ -689,28 +706,56 @@ function build_processed(c::VLFCache, source_folder::AbstractString, rx, tx, dat
     bns = baseline_ns === nothing ? nothing : copy(baseline_ns.data)
 
     # --- transmitter-dropout masking (raw untouched) ------------------------
-    # Detect power-dropouts on the near-field baseline amplitude and NaN those
-    # intervals in BOTH amplitude and phase of the target, and in the baseline
-    # phase — the dropout is a transmitter event, so it corrupts the baseline's
-    # phase tracking too. The induced NaN gaps let stitch_phase catch the n×90°
-    # cycle slips that loss-of-lock leaves behind.
+    # Two evidence sources combined per-sample into one mask:
+    #   (a) single-receiver detection on a trusted near-field baseline amplitude
+    #       (gated on params.dropout_db); fires only where the baseline records.
+    #   (b) externally supplied network-coincidence `dropout_ranges`, admitted
+    #       ONLY at samples where the baseline is silent (NaN), so the trusted
+    #       near-field detector is never overridden where it has evidence — the
+    #       network only fills the baseline's gaps.
+    # A baseline whose grid disagrees with the target is treated as absent.
+    local usable_baseline
+    if baseline_amp === nothing
+        usable_baseline = nothing
+    elseif isapprox(baseline_amp.Fs, Fs; rtol = 1e-9) && length(baseline_amp.data) == n
+        usable_baseline = baseline_amp
+    else
+        @warn "baseline_amp grid ≠ target grid — treated as absent for dropout masking." rx=rxs tx=txs date
+        usable_baseline = nothing
+    end
+
+    mask = falses(n)
+
     if params.dropout_db !== nothing
-        if baseline_amp === nothing
-            @warn "dropout_db set but no baseline_amp given — dropout masking skipped." rx=rxs tx=txs date
-        elseif !isapprox(baseline_amp.Fs, Fs; rtol = 1e-9) || length(baseline_amp.data) != n
-            @warn "baseline_amp grid ≠ target grid — dropout masking skipped." rx=rxs tx=txs date
+        if usable_baseline === nothing
+            @warn "dropout_db set but no usable baseline_amp — single-receiver masking skipped." rx=rxs tx=txs date
         else
-            ranges = detect_dropouts(baseline_amp;
-                                     drop_db   = params.dropout_db,
-                                     window_s  = params.dropout_window,
-                                     pad_s     = params.dropout_pad,
+            for r in detect_dropouts(usable_baseline; drop_db = params.dropout_db,
+                                     window_s = params.dropout_window,
+                                     pad_s = params.dropout_pad,
                                      min_valid = params.dropout_min_valid)
-            for v in (ew_amp_pT, ns_amp_pT, ew_p, ns_p)
-                _mask_ranges!(v, ranges)
+                @views mask[r] .= true
             end
-            bew === nothing || _mask_ranges!(bew, ranges)
-            bns === nothing || _mask_ranges!(bns, ranges)
         end
+    end
+
+    if dropout_ranges !== nothing && !isempty(dropout_ranges)
+        if any(r -> r.start < 1 || r.stop > n, dropout_ranges)
+            @warn "dropout_ranges fall outside target grid 1:$n — external ranges skipped." rx=rxs tx=txs date
+        else
+            base_silent = usable_baseline === nothing ? trues(n) : isnan.(usable_baseline.data)
+            @inbounds for r in dropout_ranges, i in r
+                base_silent[i] && (mask[i] = true)
+            end
+        end
+    end
+
+    if any(mask)
+        for v in (ew_amp_pT, ns_amp_pT, ew_p, ns_p)
+            v[mask] .= NaN
+        end
+        bew === nothing || (bew[mask] .= NaN)
+        bns === nothing || (bns[mask] .= NaN)
     end
 
     combined_pT = combine_quadrature(ns_amp_pT, ew_amp_pT)   # NaN where either masked
@@ -744,7 +789,8 @@ function get_processed(c::VLFCache, source_folder::AbstractString, rx, tx, date:
                        params::ProcessParams; recompute::Bool = false,
                        baseline_ns::Union{Nothing,RawDay} = nothing,
                        baseline_ew::Union{Nothing,RawDay} = nothing,
-                       baseline_amp::Union{Nothing,RawDay} = nothing)
+                       baseline_amp::Union{Nothing,RawDay} = nothing,
+                       dropout_ranges::Union{Nothing,Vector{UnitRange{Int}}} = nothing)
     if !recompute
         cached = _load_entry(processed_path(c, date, rx, tx))
         if cached isa ProcessedDay
@@ -756,7 +802,7 @@ function get_processed(c::VLFCache, source_folder::AbstractString, rx, tx, date:
     end
     day = build_processed(c, source_folder, rx, tx, date, params;
                           baseline_ns = baseline_ns, baseline_ew = baseline_ew,
-                          baseline_amp = baseline_amp, recompute = recompute)
+                          baseline_amp = baseline_amp, dropout_ranges = dropout_ranges, recompute = recompute)
     day === nothing && return nothing
     _save_entry(processed_path(c, date, rx, tx), day)
     _index_add_processed!(c, date, rx, tx)
@@ -779,9 +825,126 @@ function get_processed_view(c::VLFCache, source_folder::AbstractString, rx, tx, 
                             recompute::Bool = false,
                             baseline_ns::Union{Nothing,RawDay} = nothing,
                             baseline_ew::Union{Nothing,RawDay} = nothing,
-                            baseline_amp::Union{Nothing,RawDay} = nothing)
+                            baseline_amp::Union{Nothing,RawDay} = nothing,
+                            dropout_ranges::Union{Nothing,Vector{UnitRange{Int}}} = nothing)
     day = get_processed(c, source_folder, rx, tx, date, params;
                         recompute = recompute, baseline_ns = baseline_ns,
-                        baseline_ew = baseline_ew, baseline_amp = baseline_amp)
+                        baseline_ew = baseline_ew, baseline_amp = baseline_amp, dropout_ranges=dropout_ranges)
     return day === nothing ? nothing : view_units(day; efield = efield, db = db)
+end
+
+# Default network settings, applied under any keys the caller omits from net_kw.
+# Kept here so detect_dropouts_network and network_dropout_label always receive a
+# complete, identical keyword set (the label is order- and value-sensitive).
+const _NET_DEFAULTS = (; drop_db = 10.0, window_s = 300.0, pad_s = 1.0, 
+                         min_valid = 30, min_coincident = nothing, min_receivers = 2)
+
+# Copy of `p` with only `dropout_label` replaced. Field-preserving, so it survives
+# future ProcessParams fields without edits here.
+function _with_dropout_label(p::ProcessParams, label::AbstractString)
+    base = (; (f => getfield(p, f) for f in fieldnames(ProcessParams))...)
+    return ProcessParams(; merge(base, (; dropout_label = label))...)
+end
+
+"""
+    NetworkJob(cache, src, rx, params)
+
+One receiver's inputs for [`get_processed_network`](@ref): its cache, source
+folder, receiver code, and per-receiver [`ProcessParams`](@ref). Bundling them
+prevents the misalignment possible with parallel vectors. `params.dropout_label`
+is overwritten by the orchestrator with the network label, so leave it unset.
+"""
+struct NetworkJob
+    cache::VLFCache
+    src::String
+    rx::Symbol
+    params::ProcessParams
+end
+NetworkJob(cache::VLFCache, src::AbstractString, rx, params::ProcessParams) =
+    NetworkJob(cache, String(src), Symbol(rx), params)
+
+"""
+    get_processed_network(jobs::AbstractVector{NetworkJob}, tx, date;
+                          baseline_amp=nothing, baseline_ns=nothing, baseline_ew=nothing,
+                          net_kw=(;), recompute=false)
+        -> Vector{Union{ProcessedDay,Nothing}}
+
+Process a set of receivers of the same `tx`/`date` as a mutual transmitter-dropout
+coincidence network. Detection runs once over the jobs' raw EW amplitudes
+([`detect_dropouts_network`](@ref)); the resulting ranges are masked into every
+target, but — per [`build_processed`](@ref)'s gating — only at samples where the
+shared near-field `baseline_amp` is itself silent (NaN), so the trusted near-field
+detector is never overridden where it has evidence.
+
+`net_kw` overrides any of the network settings (`drop_db`, `window_s`, `pad_s`,
+`min_valid`, `min_coincident`, `min_receivers`); omitted keys take `_NET_DEFAULTS`.
+`baseline_amp`/`baseline_ns`/`baseline_ew` are shared across all targets.
+
+Caching: a target is rebuilt when `recompute` is set, when it is uncached, or when
+its stored provenance differs from the current parameters (which include the network
+`dropout_label`); otherwise the cached product is honored. The coincidence detection
+is skipped entirely when every target is already cached and provenance-matched — the
+raw amplitudes are still gathered (a cache hit when raw is cached) to compute the
+label that gates that decision. Returns one entry per job in input order; an entry is
+`nothing` when that receiver has no raw data for `(date, rx, tx)`.
+
+!!! note
+    `dropout_label` records the network identity (contributing receiver codes plus
+    settings) but not the `baseline_amp` used for gating, so honoring the cache on a
+    label match assumes the same baseline across calls.
+"""
+function get_processed_network(jobs::AbstractVector{NetworkJob}, tx, date::Date;
+                               baseline_amp::Union{Nothing,RawDay} = nothing,
+                               baseline_ns::Union{Nothing,RawDay} = nothing,
+                               baseline_ew::Union{Nothing,RawDay} = nothing,
+                               net_kw = (;), recompute::Bool = false)
+    txs = Symbol(tx)
+    nk  = merge(_NET_DEFAULTS, net_kw)
+
+    amps = RawDay[]
+    for j in jobs
+        a = get_raw(j.cache, j.src, DataKey(date, j.rx, txs, EW, AMPLITUDE);
+                    recompute = recompute)
+        a === nothing || push!(amps, a)
+    end
+    have_network = length(amps) >= nk.min_receivers
+    net_label = have_network ? network_dropout_label(amps; nk...) : ""
+
+    jparams = [_with_dropout_label(j.params, net_label) for j in jobs]
+
+    cached      = Vector{Union{ProcessedDay,Nothing}}(nothing, length(jobs))
+    needs_build = falses(length(jobs))
+    for i in eachindex(jobs)
+        if recompute
+            needs_build[i] = true
+        else
+            c = _load_entry(processed_path(jobs[i].cache, date, jobs[i].rx, txs))
+            if c isa ProcessedDay && provenance_matches(c.params, jparams[i])
+                cached[i] = c
+            else
+                needs_build[i] = true
+            end
+        end
+    end
+
+    net_ranges = (any(needs_build) && have_network) ?
+                 detect_dropouts_network(amps; nk...) : UnitRange{Int}[]
+
+    results = Vector{Union{ProcessedDay,Nothing}}(nothing, length(jobs))
+    for i in eachindex(jobs)
+        if !needs_build[i]
+            results[i] = cached[i]
+            continue
+        end
+        day = build_processed(jobs[i].cache, jobs[i].src, jobs[i].rx, txs, date, jparams[i];
+                              baseline_ns = baseline_ns, baseline_ew = baseline_ew,
+                              baseline_amp = baseline_amp, dropout_ranges = net_ranges,
+                              recompute = recompute)
+        if day !== nothing
+            _save_entry(processed_path(jobs[i].cache, date, jobs[i].rx, txs), day)
+            _index_add_processed!(jobs[i].cache, date, jobs[i].rx, txs)
+        end
+        results[i] = day
+    end
+    return results
 end

@@ -619,4 +619,69 @@ end
     @test isequal(d1.data, a)                              # original not mutated
 end
 
+@testset "process: external dropout_ranges masking + provenance" begin
+    mktempdir() do dir
+        make_avid(dir; ch="EW", q="A", data=fill(3.0, 10))
+        make_avid(dir; ch="NS", q="A", data=fill(4.0, 10))
+        cache  = VLFCache(dir)
+        params = ProcessParams(cal_num = 2.0, dropout_label = "network[A,B]")
+
+        day = build_processed(cache, dir, :FSI, :NLK, Date(2025,6,1), params;
+                              dropout_ranges = [3:5])
+        @test isnan(day.EW_amp[3]) && isnan(day.EW_amp[5])
+        @test day.EW_amp[6] == 6.0                       # outside the range, untouched
+        @test isnan(day.NS_amp[4]) && isnan(day.combined_amp[3])
+
+        # provenance distinguishes masks by label
+        @test !VLF.provenance_matches(params, ProcessParams(cal_num = 2.0))
+        @test  VLF.provenance_matches(params,
+                  ProcessParams(cal_num = 2.0, dropout_label = "network[A,B]"))
+
+        # out-of-grid ranges are skipped with a warning, not applied blindly
+        day2 = @test_logs (:warn,) match_mode=:any build_processed(
+            cache, dir, :FSI, :NLK, Date(2025,6,1), params; dropout_ranges = [3:200_000])
+        @test day2.EW_amp[3] == 6.0                      # nothing masked
+
+        # label is deterministic over receiver set + settings
+        g  = timegrid(1.0)
+        mk(s) = RawDay(Date(2025,6,1), s, :NLK, EW, AMPLITUDE, 24.8e3, 1.0, g, fill(1.0, length(g)))
+        kw = (; drop_db=10.0, window_s=300.0, pad_s=1.0, min_valid=30,
+                min_coincident=nothing, min_receivers=2)
+        @test network_dropout_label([mk(:B), mk(:A)]; kw...) ==
+              network_dropout_label([mk(:A), mk(:B)]; kw...)   # order-independent
+    end
+end
+
+@testset "network: get_processed_network (per-sample baseline gating + cache)" begin
+    mktempdir() do root
+        date = Date(2025,6,1); N = 400
+        drop!(v) = (v[200:209] .= 1.0; v)                  # coincident deep drop (0 dB vs 40 dB)
+        function job(name)
+            d = mkpath(joinpath(root, name))
+            make_avid(d; rx=name, ch="EW", q="A", data=drop!(fill(100.0, N)))
+            make_avid(d; rx=name, ch="NS", q="A", data=fill(50.0, N))
+            NetworkJob(VLFCache(d), d, Symbol(name), ProcessParams(cal_num=1.0))
+        end
+        net_kw = (; drop_db=10.0, window_s=120.0, pad_s=1.0, min_valid=30, min_receivers=2)
+
+        jobs = [job("AA"), job("BB"), job("CC")]
+        r1 = get_processed_network(jobs, :NLK, date; net_kw=net_kw)   # no baseline ⇒ network everywhere
+        @test all(d -> d isa ProcessedDay, r1)
+        @test isnan(r1[1].EW_amp[205]) && isnan(r1[1].NS_amp[205])    # both channels notched
+        @test r1[1].EW_amp[150] == 100.0                              # outside drop untouched
+        @test !isempty(r1[1].params.dropout_label)                   # provenance recorded
+
+        # Baseline recording across the drop ⇒ network suppressed there (Note 2).
+        g = timegrid(1.0)
+        bamp = RawDay(date, :REF, :NLK, EW, AMPLITUDE, 24.8e3, 1.0, g, fill(100.0, length(g)))
+        jobs2 = [job("DD"), job("EE"), job("FF")]
+        r2 = get_processed_network(jobs2, :NLK, date; baseline_amp=bamp, net_kw=net_kw)
+        @test r2[1].EW_amp[205] == 1.0                               # not masked: dropout sample survives
+
+        # Re-run honors the provenance-matched cache and returns the same product.
+        r1b = get_processed_network(jobs, :NLK, date; net_kw=net_kw)
+        @test isequal(r1b[1].EW_amp, r1[1].EW_amp)
+    end
+end
+
 end # @testset "VLF.jl"
