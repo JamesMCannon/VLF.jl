@@ -7,6 +7,8 @@ using JLD2
 include("types.jl")
 include("mat.jl")
 include("cache.jl")
+include("phase.jl")
+include("dropouts.jl")
 include("process.jl")
 
 # --- data model ---
