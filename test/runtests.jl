@@ -684,4 +684,43 @@ end
     end
 end
 
+@testset "network: per-receiver detect_channel selects evidence + labels it" begin
+    mktempdir() do root
+        date = Date(2025,6,1); N = 400
+        # EW carries a coincident deep drop (0 dB vs 40 dB); NS is flat. The
+        # detection channel alone decides whether the network sees the event.
+        drop!(v) = (v[200:209] .= 1.0; v)
+        function job(name; detect_channel = EW)
+            d = mkpath(joinpath(root, name))
+            make_avid(d; rx=name, ch="EW", q="A", data=drop!(fill(100.0, N)))
+            make_avid(d; rx=name, ch="NS", q="A", data=fill(100.0, N))
+            NetworkJob(VLFCache(d), d, Symbol(name), ProcessParams(cal_num=1.0);
+                       detect_channel = detect_channel)
+        end
+        net_kw = (; drop_db=10.0, window_s=120.0, pad_s=1.0, min_valid=30, min_receivers=2)
+
+        # Detecting on NS (flat) finds nothing, so the EW drop survives unmasked.
+        jobs_ns = [job("GG"; detect_channel=NS), job("HH"; detect_channel=NS)]
+        r_ns = get_processed_network(jobs_ns, :NLK, date; net_kw=net_kw)
+        @test r_ns[1].EW_amp[205] == 1.0
+        @test occursin("NS", r_ns[1].params.dropout_label)
+
+        # Detecting on EW (default) finds the drop and masks every product of the
+        # receiver, including the NS channel that carried no drop itself.
+        jobs_ew = [job("II"), job("JJ")]
+        r_ew = get_processed_network(jobs_ew, :NLK, date; net_kw=net_kw)
+        @test isnan(r_ew[1].EW_amp[205]) && isnan(r_ew[1].NS_amp[205])
+        @test occursin("EW", r_ew[1].params.dropout_label)
+
+        # Label isolates the channel: identical receiver set, different evidence
+        # channel ⇒ different label, so the cache cannot cross-serve the two.
+        g = timegrid(1.0)
+        lblkw = (; drop_db=10.0, window_s=120.0, pad_s=1.0, min_valid=30,
+                   min_coincident=nothing, min_receivers=2)
+        mkc(s, ch) = RawDay(date, s, :NLK, ch, AMPLITUDE, 24.8e3, 1.0, g, fill(1.0, length(g)))
+        @test network_dropout_label([mkc(:A,EW), mkc(:B,EW)]; lblkw...) !=
+              network_dropout_label([mkc(:A,NS), mkc(:B,NS)]; lblkw...)
+    end
+end
+
 end # @testset "VLF.jl"

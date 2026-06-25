@@ -599,15 +599,16 @@ end
                           min_coincident, min_receivers) -> String
 
 Deterministic provenance label for a [`detect_dropouts_network`](@ref) mask: the
-sorted contributing receiver codes plus the coincidence settings. Pass the result
-as `ProcessParams(...; dropout_label=…)` alongside the same network's ranges so the
+sorted contributing receiver codes, each tagged with the channel that supplied its
+evidence (`FSI:EW`), plus the coincidence settings. Pass the result as
+`ProcessParams(...; dropout_label=…)` alongside the same network's ranges so the
 cache can tell network-masked products apart. Derive the label and the ranges from
 the *same* `amps` and keyword values to keep them consistent.
 """
 function network_dropout_label(amps::AbstractVector{RawDay};
                                drop_db, window_s, pad_s, min_valid,
                                min_coincident, min_receivers)
-    rxs = join(sort([string(a.rx) for a in amps]), ",")
+    rxs = join(sort([string(a.rx) * ":" * chstr(a.channel) for a in amps]), ",")
     mc  = min_coincident === nothing ? "all" : string(min_coincident)
     return "network[$rxs];db=$drop_db,win=$window_s,pad=$pad_s," *
            "mv=$min_valid,mc=$mc,mr=$min_receivers"
@@ -847,21 +848,31 @@ function _with_dropout_label(p::ProcessParams, label::AbstractString)
 end
 
 """
-    NetworkJob(cache, src, rx, params)
+    NetworkJob(cache, src, rx, params; detect_channel=EW)
 
 One receiver's inputs for [`get_processed_network`](@ref): its cache, source
-folder, receiver code, and per-receiver [`ProcessParams`](@ref). Bundling them
-prevents the misalignment possible with parallel vectors. `params.dropout_label`
-is overwritten by the orchestrator with the network label, so leave it unset.
+folder, receiver code, per-receiver [`ProcessParams`](@ref), and the channel whose
+amplitude votes in the coincidence detector. Bundling them prevents the
+misalignment possible with parallel vectors. `params.dropout_label` is overwritten
+by the orchestrator with the network label, so leave it unset.
+
+`detect_channel` (`EW` or `NS`) selects only the *evidence* channel for dropout
+detection. The detected mask is applied to every product of the receiver — both
+amplitude channels and both phase channels — independent of this choice, because a
+transmitter power-down drops all channels together. The selected channel is folded
+into the network label (see [`network_dropout_label`](@ref)), so a product cached
+under one detection channel does not satisfy a request under another.
 """
 struct NetworkJob
     cache::VLFCache
     src::String
     rx::Symbol
     params::ProcessParams
+    detect_channel::Channel
 end
-NetworkJob(cache::VLFCache, src::AbstractString, rx, params::ProcessParams) =
-    NetworkJob(cache, String(src), Symbol(rx), params)
+NetworkJob(cache::VLFCache, src::AbstractString, rx, params::ProcessParams;
+           detect_channel::Channel = EW) =
+    NetworkJob(cache, String(src), Symbol(rx), params, detect_channel)
 
 """
     get_processed_network(jobs::AbstractVector{NetworkJob}, tx, date;
@@ -870,7 +881,8 @@ NetworkJob(cache::VLFCache, src::AbstractString, rx, params::ProcessParams) =
         -> Vector{Union{ProcessedDay,Nothing}}
 
 Process a set of receivers of the same `tx`/`date` as a mutual transmitter-dropout
-coincidence network. Detection runs once over the jobs' raw EW amplitudes
+coincidence network. Detection runs once over each job's chosen detection-channel
+amplitude (`NetworkJob.detect_channel`, default `EW`)
 ([`detect_dropouts_network`](@ref)); the resulting ranges are masked into every
 target, but — per [`build_processed`](@ref)'s gating — only at samples where the
 shared near-field `baseline_amp` is itself silent (NaN), so the trusted near-field
@@ -903,7 +915,7 @@ function get_processed_network(jobs::AbstractVector{NetworkJob}, tx, date::Date;
 
     amps = RawDay[]
     for j in jobs
-        a = get_raw(j.cache, j.src, DataKey(date, j.rx, txs, EW, AMPLITUDE);
+        a = get_raw(j.cache, j.src, DataKey(date, j.rx, txs, j.detect_channel, AMPLITUDE);
                     recompute = recompute)
         a === nothing || push!(amps, a)
     end
