@@ -145,7 +145,7 @@ Phase:
   [`build_processed`](@ref) via `dropout_ranges` (e.g. from
   [`detect_dropouts_network`](@ref)). Caller-asserted: it labels the mask source
   so the cache can distinguish products, but is not verified against the ranges.
-  
+
 !!! note
     `slope` IS baked into the cached [`ProcessedDay`](@ref) (it changes the phase
     product), so changing it requires `recompute=true` in [`get_processed`](@ref);
@@ -256,6 +256,42 @@ struct ProcessedDay
     NS_pha::Vector{Float64}        # deg, cleaned + stitched
     # dominant_pha::Vector{Float64}  # TODO: phase of the higher-amplitude channel
     params::ProcessParams
+end
+
+"""
+    RotatedDay
+
+Horizontal magnetic flux density for one `(date, rx, tx)` expressed in the radial
+(`r̂`, away from the source) and azimuthal (`φ̂`, 90° CCW from `r̂`) frame of Gross
+et al. (2018), Eq. (5). Built from a [`ProcessedDay`](@ref) by [`rotate`](@ref).
+All products share the parent's [`timegrid`](@ref); amplitudes are in pT, phases
+in degrees in `(-180, 180]`. A sample is valid only where *both* parent channels
+are valid, so `NaN` in either NS/EW amplitude or phase yields `NaN` in both
+rotated components.
+
+`bearing_deg` is `θ_az`: the rx→tx forward azimuth, degrees clockwise from true
+north. `polarity` is the per-channel ±1 applied to each reconstructed phasor;
+the default `(NS = 1, EW = -1)` reproduces Gross's stated winding (the −ŷ EW
+surface vector carries the minus sign). `baseline_label` is `""` for an absolute
+(un-referenced) product and names the reference receiver after
+[`baseline_subtract`](@ref). `params` is carried through from the parent for
+provenance.
+"""
+struct RotatedDay
+    date::Date
+    rx::Symbol
+    tx::Symbol
+    Fc::Float64
+    Fs::Float64
+    time::TimeGrid
+    bearing_deg::Float64
+    Br_amp::Vector{Float64}     # pT
+    Bazi_amp::Vector{Float64}   # pT
+    Br_pha::Vector{Float64}     # deg, (-180, 180]
+    Bazi_pha::Vector{Float64}   # deg, (-180, 180]
+    polarity::NamedTuple        # (NS = +1, EW = -1) default
+    params::ProcessParams
+    baseline_label::String
 end
 
 # ----------------------------------------------------------------------------

@@ -723,4 +723,232 @@ end
     end
 end
 
+# ===========================================================================
+# Rotation into the radial/azimuthal frame of Gross et al. (2018), Eq. (5).
+# Helpers below are local to these blocks.
+# ===========================================================================
+
+# Smallest unsigned angular difference (deg), wrap-aware so +180 ≡ -180 (the
+# angle of a real-negative phasor lands on either sign depending on the signed
+# zero of its imaginary part).
+angeq(a, b; atol = 1e-9) = abs(rem(a - b, 360, RoundNearest)) <= atol
+
+# Reconstruct a complex phasor from a (pT, deg) amplitude/phase pair.
+cphasor(amp, pha) = amp * cis(deg2rad(pha))
+
+# Build a ProcessedDay directly from channel vectors on a synthetic grid, so the
+# rotation math is exercised in isolation from the build/cache path.
+function mk_processed(; NS_amp, EW_amp, NS_pha, EW_pha,
+                        date = Date(2025, 6, 1), rx = :FSI, tx = :NLK,
+                        Fc = 24.8e3, Fs = 1.0, params = ProcessParams())
+    n  = length(NS_amp)
+    tg = range(0.0; step = 1 / Fs, length = n)          # concrete TimeGrid
+    comb = combine_quadrature(collect(float.(NS_amp)), collect(float.(EW_amp)))
+    return ProcessedDay(date, rx, tx, Fc, Fs, tg,
+                        collect(float.(EW_amp)), collect(float.(NS_amp)), comb,
+                        collect(float.(EW_pha)), collect(float.(NS_pha)), params)
+end
+
+# ---------------------------------------------------------------------------
+@testset "rotate: round-trip / norm preservation" begin
+    bearing = 37.0
+    A_NS, A_EW, ψ_NS, ψ_EW = 4.0, 3.0, 25.0, -40.0
+    day = mk_processed(NS_amp = [A_NS], EW_amp = [A_EW], NS_pha = [ψ_NS], EW_pha = [ψ_EW])
+    R = rotate(day, bearing)
+
+    # R(α) is orthonormal, so it preserves the 2-norm of the complex phasor pair.
+    @test R.Br_amp[1]^2 + R.Bazi_amp[1]^2 ≈ A_NS^2 + A_EW^2
+
+    # Inverse rotation R(-α) recovers the channel phasors, including the default
+    # polarity (NS = +1, EW = -1) carried by the EW entry.
+    α    = deg2rad(bearing) + π / 2
+    Br   = cphasor(R.Br_amp[1],   R.Br_pha[1])
+    Bazi = cphasor(R.Bazi_amp[1], R.Bazi_pha[1])
+    vNS  = cos(α) * Br - sin(α) * Bazi
+    vEW  = sin(α) * Br + cos(α) * Bazi
+    @test vNS ≈  A_NS * cis(deg2rad(ψ_NS))
+    @test vEW ≈ -A_EW * cis(deg2rad(ψ_EW))
+end
+
+@testset "rotate: degenerate bearings reproduce a channel" begin
+    day = mk_processed(NS_amp = [4.0], EW_amp = [3.0], NS_pha = [0.0], EW_pha = [0.0])
+
+    # Bearing 0 (tx due north): r̂ = south = EW-loop normal (−ŷ); φ̂ = east =
+    # NS-loop normal (+x̂). So |B_r| = A_EW and |B_azi| = A_NS.
+    R0 = rotate(day, 0.0)
+    @test R0.Br_amp[1]   ≈ 3.0
+    @test R0.Bazi_amp[1] ≈ 4.0
+    # Default polarity sends both components negative-real here (ψ = 0) ⇒ ∠ = 180°.
+    @test angeq(R0.Br_pha[1],   180.0)
+    @test angeq(R0.Bazi_pha[1], 180.0)
+
+    # Bearing 90 (tx due east): r̂ = west = NS-loop normal ⇒ the roles swap.
+    R90 = rotate(day, 90.0)
+    @test R90.Br_amp[1]   ≈ 4.0
+    @test R90.Bazi_amp[1] ≈ 3.0
+end
+
+@testset "rotate: common k×90° commutes (overall ambiguity)" begin
+    base = (NS_amp = [4.0], EW_amp = [3.0], NS_pha = [25.0], EW_pha = [-40.0])
+    R  = rotate(mk_processed(; base...), 37.0)
+    Rk = rotate(mk_processed(; NS_amp = base.NS_amp, EW_amp = base.EW_amp,
+                               NS_pha = base.NS_pha .+ 90, EW_pha = base.EW_pha .+ 90), 37.0)
+    # A common 90° on both channels factors out as a scalar: amplitudes untouched,
+    # both rotated phases advance by the same 90°.
+    @test Rk.Br_amp   ≈ R.Br_amp
+    @test Rk.Bazi_amp ≈ R.Bazi_amp
+    @test angeq(Rk.Br_pha[1],   R.Br_pha[1]   + 90)
+    @test angeq(Rk.Bazi_pha[1], R.Bazi_pha[1] + 90)
+end
+
+@testset "rotate: relative m×90° does NOT factor out" begin
+    base = (NS_amp = [4.0], EW_amp = [3.0], NS_pha = [25.0], EW_pha = [-40.0])
+    R   = rotate(mk_processed(; base...), 37.0)
+    # A 90° on the NS channel ALONE scales one entry; it changes both rotated
+    # amplitudes — correct relative offset is a genuine precondition to rotation.
+    Rm  = rotate(mk_processed(; NS_amp = base.NS_amp, EW_amp = base.EW_amp,
+                                NS_pha = base.NS_pha .+ 90, EW_pha = base.EW_pha), 37.0)
+    @test !isapprox(Rm.Br_amp[1],   R.Br_amp[1];   atol = 1e-9)
+    @test !isapprox(Rm.Bazi_amp[1], R.Bazi_amp[1]; atol = 1e-9)
+end
+
+@testset "rotate: ±360° unwrap is a no-op" begin
+    base = (NS_amp = [4.0], EW_amp = [3.0], NS_pha = [25.0], EW_pha = [-40.0])
+    R    = rotate(mk_processed(; base...), 37.0)
+    R360 = rotate(mk_processed(; NS_amp = base.NS_amp, EW_amp = base.EW_amp,
+                                 NS_pha = base.NS_pha .+ 360, EW_pha = base.EW_pha .- 360), 37.0)
+    @test R360.Br_amp   ≈ R.Br_amp
+    @test R360.Bazi_amp ≈ R.Bazi_amp
+    @test angeq(R360.Br_pha[1],   R.Br_pha[1])
+    @test angeq(R360.Bazi_pha[1], R.Bazi_pha[1])
+end
+
+@testset "rotate: common-mode phase leaves |B_r|, |B_azi|, ψ₀ invariant" begin
+    φ    = 33.0
+    base = (NS_amp = [4.0], EW_amp = [3.0], NS_pha = [25.0], EW_pha = [-40.0])
+    R   = rotate(mk_processed(; base...), 37.0)
+    Rcm = rotate(mk_processed(; NS_amp = base.NS_amp, EW_amp = base.EW_amp,
+                                NS_pha = base.NS_pha .- φ, EW_pha = base.EW_pha .- φ), 37.0)
+    # ψ₀ = ∠(−B_r / B_azi) sets the ellipse shape and is source-phase independent.
+    ψ0(r) = rad2deg(angle(-cphasor(r.Br_amp[1], r.Br_pha[1]) /
+                            cphasor(r.Bazi_amp[1], r.Bazi_pha[1])))
+    @test Rcm.Br_amp   ≈ R.Br_amp
+    @test Rcm.Bazi_amp ≈ R.Bazi_amp
+    @test angeq(ψ0(Rcm), ψ0(R))
+    # Individual rotated phases shift by the common −φ.
+    @test angeq(Rcm.Br_pha[1],   R.Br_pha[1]   - φ)
+    @test angeq(Rcm.Bazi_pha[1], R.Bazi_pha[1] - φ)
+end
+
+@testset "rotate: TM-dominant linear polarization ⇒ |B_azi| ≫ |B_r|" begin
+    # Construct a linearly polarized field aligned to φ̂ at bearing 30°, so B_r ≈ 0.
+    # With α = 30° + 90° = 120°, B_r = 0 requires v_EW = −cot(α)·v_NS = v_NS/√3.
+    # Take v_NS = 1 (A_NS = 1, ψ_NS = 0); v_EW = +1/√3 ⇒ with pEW = −1, that is
+    # A_EW = 1/√3 at ψ_EW = 180°.
+    day = mk_processed(NS_amp = [1.0], EW_amp = [1 / sqrt(3)],
+                       NS_pha = [0.0], EW_pha = [180.0])
+    R = rotate(day, 30.0)
+    @test isapprox(R.Br_amp[1], 0.0; atol = 1e-9)
+    @test R.Bazi_amp[1] ≈ 2 / sqrt(3)
+    @test R.Bazi_amp[1] > 1.0                 # azimuthal dominance
+end
+
+@testset "rotate: NaN in either channel ⇒ both components NaN" begin
+    # A rotated sample is valid only where BOTH NS and EW are valid (amp AND phase).
+    day = mk_processed(NS_amp = [4.0, NaN, 4.0], EW_amp = [3.0, 3.0, 3.0],
+                       NS_pha = [10.0, 10.0, NaN], EW_pha = [20.0, 20.0, 20.0])
+    R = rotate(day, 30.0)
+    @test isnan(R.Br_amp[2]) && isnan(R.Bazi_amp[2]) &&
+          isnan(R.Br_pha[2]) && isnan(R.Bazi_pha[2])     # NS amplitude gap
+    @test isnan(R.Br_amp[3]) && isnan(R.Bazi_amp[3]) &&
+          isnan(R.Br_pha[3]) && isnan(R.Bazi_pha[3])     # NS phase gap
+    @test all(isfinite, (R.Br_amp[1], R.Bazi_amp[1], R.Br_pha[1], R.Bazi_pha[1]))
+end
+
+@testset "rotate: polarity override flips one channel's sign" begin
+    day = mk_processed(NS_amp = [4.0], EW_amp = [3.0], NS_pha = [0.0], EW_pha = [0.0])
+    Rd = rotate(day, 0.0)                                   # default (NS = 1, EW = -1)
+    Rp = rotate(day, 0.0; polarity = (NS = 1, EW = 1))      # EW sign not flipped
+    # |B_r| is unchanged by a channel sign at this bearing; ∠B_r flips by 180°.
+    @test Rd.Br_amp ≈ Rp.Br_amp
+    @test angeq(Rd.Br_pha[1], Rp.Br_pha[1] + 180)
+    @test Rd.polarity == (NS = 1, EW = -1) && Rp.polarity == (NS = 1, EW = 1)
+end
+
+@testset "rotate: warns when parent phase is referenced/detrended" begin
+    clean = mk_processed(NS_amp = [4.0], EW_amp = [3.0], NS_pha = [0.0], EW_pha = [0.0])
+    @test_nowarn rotate(clean, 45.0)
+
+    sloped = mk_processed(NS_amp = [4.0], EW_amp = [3.0], NS_pha = [0.0], EW_pha = [0.0],
+                          params = ProcessParams(slope = 0.0))
+    @test_logs (:warn,) match_mode = :any rotate(sloped, 45.0)
+
+    based = mk_processed(NS_amp = [4.0], EW_amp = [3.0], NS_pha = [0.0], EW_pha = [0.0],
+                         params = ProcessParams(baseline = "REF"))
+    @test_logs (:warn,) match_mode = :any rotate(based, 45.0)
+end
+
+@testset "rotate: baseline_subtract per-component path differential" begin
+    tgt = mk_processed(NS_amp = [4.0], EW_amp = [3.0], NS_pha = [50.0], EW_pha = [70.0])
+    ref = mk_processed(NS_amp = [9.0], EW_amp = [2.0], NS_pha = [10.0], EW_pha = [-25.0]; rx = :REF)
+    Rt  = rotate(tgt, 30.0)
+    Rr  = rotate(ref, 30.0)
+    D   = baseline_subtract(Rt, Rr)
+
+    # The differential is the per-component rotated-phase difference. (∠B_r itself
+    # depends on the channel amplitude ratio, so unequal receivers give a nonzero
+    # differential even at equal channel phases.)
+    @test angeq(D.Br_pha[1],   Rt.Br_pha[1]   - Rr.Br_pha[1])
+    @test angeq(D.Bazi_pha[1], Rt.Bazi_pha[1] - Rr.Bazi_pha[1])
+
+    # Differencing a rotated day against an identical copy yields a zero differential.
+    self = rotate(mk_processed(NS_amp = [4.0], EW_amp = [3.0],
+                               NS_pha = [50.0], EW_pha = [70.0]; rx = :REF), 30.0)
+    Dself = baseline_subtract(Rt, self)
+    @test angeq(Dself.Br_pha[1],   0.0)
+    @test angeq(Dself.Bazi_pha[1], 0.0)
+
+    # Amplitudes are the TARGET's (reference supplies phase only), as a fresh copy.
+    @test D.Br_amp   ≈ Rt.Br_amp
+    @test D.Bazi_amp ≈ Rt.Bazi_amp
+    @test D.Br_amp !== Rt.Br_amp
+
+    # Provenance: label names the reference; bearing stays the target's.
+    @test D.baseline_label == "REF"
+    @test D.bearing_deg == Rt.bearing_deg
+end
+
+@testset "rotate: baseline_subtract cancels common-mode source phase" begin
+    # A transmitter source-phase shift Δ appears as +Δ on BOTH channels of BOTH
+    # receivers, hence +Δ on each rotated component (the common-phase commutation
+    # result). Differencing target against reference removes it, so the
+    # per-component differential is identical with and without the shared Δ.
+    Δ = 41.0
+    tgt  = mk_processed(NS_amp = [4.0], EW_amp = [3.0], NS_pha = [50.0],     EW_pha = [70.0])
+    ref  = mk_processed(NS_amp = [9.0], EW_amp = [2.0], NS_pha = [10.0],     EW_pha = [-25.0]; rx = :REF)
+    tgtΔ = mk_processed(NS_amp = [4.0], EW_amp = [3.0], NS_pha = [50.0 + Δ], EW_pha = [70.0 + Δ])
+    refΔ = mk_processed(NS_amp = [9.0], EW_amp = [2.0], NS_pha = [10.0 + Δ], EW_pha = [-25.0 + Δ]; rx = :REF)
+
+    D  = baseline_subtract(rotate(tgt,  30.0), rotate(ref,  30.0))
+    DΔ = baseline_subtract(rotate(tgtΔ, 30.0), rotate(refΔ, 30.0))
+    @test angeq(DΔ.Br_pha[1],   D.Br_pha[1])
+    @test angeq(DΔ.Bazi_pha[1], D.Bazi_pha[1])
+    # Amplitudes are independent of the shared source phase.
+    @test DΔ.Br_amp   ≈ D.Br_amp
+    @test DΔ.Bazi_amp ≈ D.Bazi_amp
+end
+
+@testset "rotate: baseline_subtract rejects tx/date/grid mismatch" begin
+    mk(; kw...) = rotate(mk_processed(; NS_amp = [4.0], EW_amp = [3.0],
+                                        NS_pha = [0.0], EW_pha = [0.0], kw...), 30.0)
+    A     = mk()
+    Btx   = mk(tx = :NML)
+    Bdate = mk(date = Date(2025, 6, 2))
+    Bgrid = rotate(mk_processed(NS_amp = [4.0, 4.0], EW_amp = [3.0, 3.0],
+                                NS_pha = [0.0, 0.0], EW_pha = [0.0, 0.0]), 30.0)
+    @test_throws ErrorException baseline_subtract(A, Btx)
+    @test_throws ErrorException baseline_subtract(A, Bdate)
+    @test_throws ErrorException baseline_subtract(A, Bgrid)
+end
+
 end # @testset "VLF.jl"

@@ -10,6 +10,7 @@ include("cache.jl")
 include("phase.jl")
 include("dropouts.jl")
 include("process.jl")
+include("rotate.jl")
 
 # --- data model ---
 export Channel, NS, EW
@@ -33,5 +34,6 @@ export build_processed, get_processed, get_processed_view, get_processed_network
 export NetworkJob, network_dropout_label 
 export ProcessedView, AmplitudeUnits, view_units, unit_label
 export detect_dropouts, mask_dropouts, detect_dropouts_network, mask_dropouts_network
+export rotate, baseline_subtract, RotatedDay
 
 end # module VLF
