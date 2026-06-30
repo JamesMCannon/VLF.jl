@@ -46,8 +46,15 @@ a cached product, so v5 entries are rebuilt rather than reinterpreted.
 Bumped 6 → 7: ProcessParams gained subtract_slope::Bool to indicate if the supplied slope
 should be used to detrend phase data. If `false` but a slope is provided, the slope is
 only used to anchor the unwrap (e.g. in the case of processing baseline data).
+
+Bumped 7 → 8: the phase-baseline path now consumes a pre-cleaned [`ProcessedDay`](@ref)
+reference (`build_processed`'s `baseline`/`ref_channel`) instead of raw NS/EW/amplitude
+[`RawDay`](@ref)s, and `ProcessParams.baseline` now carries a digest of the reference's
+full `ProcessParams` ([`params_digest`](@ref)), so a product referenced against a
+different baseline — or against a reference cleaned with different settings — is a
+distinct cache identity. v7 entries are rebuilt rather than reinterpreted.
 """
-const SCHEMA_VERSION = 7
+const SCHEMA_VERSION = 8
 
 """
     Channel

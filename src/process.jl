@@ -250,27 +250,32 @@ combine_quadrature(ns::AbstractVector, ew::AbstractVector) = sqrt.(ns .^ 2 .+ ew
 # --- build / get ProcessedDay ----------------------------------------------
 """
     build_processed(cache, source_folder, rx, tx, date, params;
-                    baseline_ns=nothing, baseline_ew=nothing) -> Union{ProcessedDay,Nothing}
+                    baseline=nothing, ref_channel=nothing,
+                    dropout_ranges=nothing, recompute=false) -> Union{ProcessedDay,Nothing}
 
-Assemble a [`ProcessedDay`](@ref) from raw entries (pulled via [`get_raw`](@ref),
-so they cache on first read). Amplitude channels are optional: a missing EW or NS
-amplitude (and the resulting `combined_amp`) is filled with `NaN` and a warning is
-emitted, rather than erroring — so a sweep over many days is not interrupted by a
-single day whose instrument never produced that channel. Phase channels are
-likewise optional (NaN if missing). Returns `nothing` only when *no* raw entry of
-any kind exists for the `(date, rx, tx)`.
+Assemble a [`ProcessedDay`](@ref) from raw entries. Amplitude and phase channels are
+optional (missing → `NaN` with a warning); returns `nothing` only when no raw entry
+of any kind exists for the `(date, rx, tx)`. Amplitudes are stored in linear pT.
 
-Amplitudes are stored in linear pT (use [`amplitude`](@ref) to view in µV/m or
-dB). `baseline_ns`/`baseline_ew` are optional reference-receiver phase
-[`RawDay`](@ref)s subtracted before stitching; where a baseline drops out,
-`params.slope` extrapolates the reference forward (see [`detrend_phase`](@ref)).
-With no baseline, `params.slope` linearly detrends.
+`baseline` is a pre-cleaned [`ProcessedDay`](@ref) reference (typically a near-field
+receiver of the same `tx`, built with `slope` = the carrier drift, `subtract_slope =
+false`, and `dropout_db = nothing`). Its phase is subtracted per channel — NS←NS,
+EW←EW when `ref_channel === nothing`, or one channel onto both when `ref_channel` is
+`EW`/`NS` (the single-channel near-field convention). Its amplitude (the `ref_channel`
+channel, else EW) drives transmitter-dropout detection. The reference is consumed
+as-is; it is not re-cleaned here. `params.baseline` is taken as provenance, not
+recomputed — stamp it via [`baseline_label`](@ref)/[`_with_baseline_label`](@ref) at
+the `get_*` layer (which the `get_processed*` family does).
+
+Warnings fire on the silent-corruption modes: a reference with `subtract_slope = true`
+(differential keeps a residual `slope·t`), a slope mismatch (breaks ramp cancellation
+and gap extrapolation), a dropout-masked reference amplitude (under-detects target
+dropouts), or a tx/date/grid mismatch.
 """
 function build_processed(c::VLFCache, source_folder::AbstractString, rx, tx, date::Date,
                          params::ProcessParams;
-                         baseline_ns::Union{Nothing,RawDay} = nothing,
-                         baseline_ew::Union{Nothing,RawDay} = nothing,
-                         baseline_amp::Union{Nothing,RawDay} = nothing,
+                         baseline::Union{Nothing,ProcessedDay} = nothing,
+                         ref_channel::Union{Nothing,Channel} = nothing,
                          dropout_ranges::Union{Nothing,Vector{UnitRange{Int}}} = nothing,
                          recompute::Bool = false)
     rxs, txs = Symbol(rx), Symbol(tx)
@@ -300,41 +305,52 @@ function build_processed(c::VLFCache, source_folder::AbstractString, rx, tx, dat
 
     ew_amp_pT = ew_amp === nothing ? fill(NaN, n) : calibrate(ew_amp, params)
     ns_amp_pT = ns_amp === nothing ? fill(NaN, n) : calibrate(ns_amp, params)
-
     ew_p = ew_pha === nothing ? fill(NaN, n) : copy(ew_pha.data)
     ns_p = ns_pha === nothing ? fill(NaN, n) : copy(ns_pha.data)
 
-    # Copy baseline phase so masking/processing never mutates the caller's (or
-    # the cached) RawDay arrays.
-    bew = baseline_ew === nothing ? nothing : copy(baseline_ew.data)
-    bns = baseline_ns === nothing ? nothing : copy(baseline_ns.data)
-
-    # --- transmitter-dropout masking (raw untouched) ------------------------
-    # Two evidence sources combined per-sample into one mask:
-    #   (a) single-receiver detection on a trusted near-field baseline amplitude
-    #       (gated on params.dropout_db); fires only where the baseline records.
-    #   (b) externally supplied network-coincidence `dropout_ranges`, admitted
-    #       ONLY at samples where the baseline is silent (NaN), so the trusted
-    #       near-field detector is never overridden where it has evidence — the
-    #       network only fills the baseline's gaps.
-    # A baseline whose grid disagrees with the target is treated as absent.
-    local usable_baseline
-    if baseline_amp === nothing
-        usable_baseline = nothing
-    elseif isapprox(baseline_amp.Fs, Fs; rtol = 1e-9) && length(baseline_amp.data) == n
-        usable_baseline = baseline_amp
+    # --- resolve the reference against the target grid ----------------------
+    # The single ProcessedDay carries every baseline role: its NS/EW phase is the
+    # reference subtracted below, and its amplitude drives dropout detection. A grid
+    # disagreement drops it entirely; the convention warnings flag the silent-
+    # corruption modes (ramp-removed reference, mismatched slope, masked reference
+    # amplitude, or a tx/date mismatch).
+    local base
+    if baseline === nothing
+        base = nothing
+    elseif !(isapprox(baseline.Fs, Fs; rtol = 1e-9) && length(baseline.time) == n)
+        @warn "baseline grid ≠ target grid — baseline ignored." rx=rxs tx=txs date
+        base = nothing
     else
-        @warn "baseline_amp grid ≠ target grid — treated as absent for dropout masking." rx=rxs tx=txs date
-        usable_baseline = nothing
+        baseline.tx == txs ||
+            @warn "baseline tx $(baseline.tx) ≠ target tx $txs — source phase will not cancel." rx=rxs date
+        baseline.date == date ||
+            @warn "baseline date $(baseline.date) ≠ target date $date." rx=rxs tx=txs
+        baseline.params.subtract_slope &&
+            @warn "baseline built with subtract_slope=true; differential carries a residual slope·t." rx=rxs tx=txs date
+        baseline.params.slope == params.slope ||
+            @warn "baseline slope $(baseline.params.slope) ≠ target slope $(params.slope)." rx=rxs tx=txs date
+        baseline.params.dropout_db === nothing ||
+            @warn "baseline built with dropout_db set; its masked amplitude under-detects target dropouts." rx=rxs tx=txs date
+        base = baseline
     end
 
-    mask = falses(n)
+    # Detection channel of the reference amplitude (pT; the dB-relative test is
+    # scale-invariant). Tracks ref_channel when it names a channel, else EW.
+    det_ch   = ref_channel === NS ? NS : EW
+    base_amp = base === nothing ? nothing : (det_ch === NS ? base.NS_amp : base.EW_amp)
 
+    # --- transmitter-dropout masking ----------------------------------------
+    # (a) single-receiver detection on the reference amplitude (gated on dropout_db),
+    # (b) external network-coincidence ranges, admitted only where the reference is
+    #     silent (NaN) so the near-field detector is never overridden where it has
+    #     evidence. The reference is immutable; the target phase is masked, which
+    #     makes the differential NaN there regardless of the reference phase.
+    mask = falses(n)
     if params.dropout_db !== nothing
-        if usable_baseline === nothing
-            @warn "dropout_db set but no usable baseline_amp — single-receiver masking skipped." rx=rxs tx=txs date
+        if base_amp === nothing
+            @warn "dropout_db set but no usable baseline — single-receiver masking skipped." rx=rxs tx=txs date
         else
-            for r in detect_dropouts(usable_baseline; drop_db = params.dropout_db,
+            for r in detect_dropouts(base_amp, Fs; drop_db = params.dropout_db,
                                      window_s = params.dropout_window,
                                      pad_s = params.dropout_pad,
                                      min_valid = params.dropout_min_valid)
@@ -342,71 +358,77 @@ function build_processed(c::VLFCache, source_folder::AbstractString, rx, tx, dat
             end
         end
     end
-
     if dropout_ranges !== nothing && !isempty(dropout_ranges)
         if any(r -> r.start < 1 || r.stop > n, dropout_ranges)
             @warn "dropout_ranges fall outside target grid 1:$n — external ranges skipped." rx=rxs tx=txs date
         else
-            base_silent = usable_baseline === nothing ? trues(n) : isnan.(usable_baseline.data)
+            base_silent = base_amp === nothing ? trues(n) : isnan.(base_amp)
             @inbounds for r in dropout_ranges, i in r
                 base_silent[i] && (mask[i] = true)
             end
         end
     end
-
     if any(mask)
         for v in (ew_amp_pT, ns_amp_pT, ew_p, ns_p)
             v[mask] .= NaN
         end
-        bew === nothing || (bew[mask] .= NaN)
-        bns === nothing || (bns[mask] .= NaN)
     end
 
-    combined_pT = combine_quadrature(ns_amp_pT, ew_amp_pT)   # NaN where either masked
+    combined_pT = combine_quadrature(ns_amp_pT, ew_amp_pT)
 
-    ew_stitched = _clean_detrend_stitch(ew_p, bew, params, tg)
-    ns_stitched = _clean_detrend_stitch(ns_p, bns, params, tg)
+    # --- per-channel phase referencing --------------------------------------
+    # The reference is already anchored + stitched, so it is used directly. With
+    # ref_channel set, one reference channel references BOTH target channels; with
+    # nothing, NS←NS and EW←EW (which needs a two-channel reference).
+    ref_ew = base === nothing ? nothing : (ref_channel === NS ? base.NS_pha : base.EW_pha)
+    ref_ns = base === nothing ? nothing : (ref_channel === EW ? base.EW_pha : base.NS_pha)
+
+    if base !== nothing
+        ref_ew !== nothing && all(isnan, ref_ew) &&
+            @warn "reference EW phase is entirely NaN — EW target left unreferenced." rx=rxs tx=txs date
+        ref_ns !== nothing && all(isnan, ref_ns) &&
+            @warn "reference NS phase is entirely NaN — NS target left unreferenced." rx=rxs tx=txs date
+    end
+
+    ew_stitched = _clean_detrend_stitch(ew_p, ref_ew, params, tg)
+    ns_stitched = _clean_detrend_stitch(ns_p, ref_ns, params, tg)
 
     return ProcessedDay(date, rxs, txs, Fc, Fs, tg,
                         ew_amp_pT, ns_amp_pT, combined_pT,
                         ew_stitched, ns_stitched, params)
 end
-
 """
     get_processed(cache, source_folder, rx, tx, date, params;
-                  recompute=false, baseline_ns=nothing, baseline_ew=nothing) -> Union{ProcessedDay,Nothing}
+                  recompute=false, baseline=nothing, ref_channel=nothing,
+                  dropout_ranges=nothing) -> Union{ProcessedDay,Nothing}
 
-Load a cached [`ProcessedDay`](@ref) or build and cache one. Returns `nothing`
-when no raw data exists for the `(date, rx, tx)`, so a loop over many days can
-simply skip the empty ones. Days missing an amplitude channel are built (NaN
-amplitude/combined, phase populated where present) and cached like any other
-product — an absent channel usually reflects a real, permanent gap in what the
-instrument recorded, so there is nothing to refresh.
-
-Unlike the raw tier, the processed product depends on `params`. With
-`recompute=false` a cached product is returned even if its stored provenance
-differs from `params`, but a warning is emitted telling you to pass
-`recompute=true` to rebuild — so a forgotten flag after a calibration/tolerance
-change is visible rather than silent.
+Load a cached [`ProcessedDay`](@ref) or build and cache one. `baseline` is a
+pre-cleaned [`ProcessedDay`](@ref) reference and `ref_channel` selects the referencing
+mode (see [`build_processed`](@ref)); the reference's full identity is folded into
+`params.baseline` via [`baseline_label`](@ref), so a target referenced against a
+different baseline — or a differently-built one — is a distinct cache entry. Returns
+`nothing` when no raw data exists. With `recompute=false` a cached product whose
+provenance differs is returned with a warning (pass `recompute=true` to rebuild).
 """
 function get_processed(c::VLFCache, source_folder::AbstractString, rx, tx, date::Date,
                        params::ProcessParams; recompute::Bool = false,
-                       baseline_ns::Union{Nothing,RawDay} = nothing,
-                       baseline_ew::Union{Nothing,RawDay} = nothing,
-                       baseline_amp::Union{Nothing,RawDay} = nothing,
+                       baseline::Union{Nothing,ProcessedDay} = nothing,
+                       ref_channel::Union{Nothing,Channel} = nothing,
                        dropout_ranges::Union{Nothing,Vector{UnitRange{Int}}} = nothing)
+    stamped = _with_baseline_label(params,
+                  baseline === nothing ? "" : baseline_label(baseline, ref_channel))
     if !recompute
         cached = _load_entry(processed_path(c, date, rx, tx))
         if cached isa ProcessedDay
-            provenance_matches(cached.params, params) ||
+            provenance_matches(cached.params, stamped) ||
                 @warn "Cached ProcessedDay was built with different parameters; \
                        returning the cached product. Pass recompute=true to rebuild." rx tx date
             return cached
         end
     end
-    day = build_processed(c, source_folder, rx, tx, date, params;
-                          baseline_ns = baseline_ns, baseline_ew = baseline_ew,
-                          baseline_amp = baseline_amp, dropout_ranges = dropout_ranges, recompute = recompute)
+    day = build_processed(c, source_folder, rx, tx, date, stamped;
+                          baseline = baseline, ref_channel = ref_channel,
+                          dropout_ranges = dropout_ranges, recompute = recompute)
     day === nothing && return nothing
     _save_entry(processed_path(c, date, rx, tx), day)
     _index_add_processed!(c, date, rx, tx)
@@ -416,24 +438,22 @@ end
 """
     get_processed_view(cache, source_folder, rx, tx, date, params;
                        efield=false, db=false, recompute=false,
-                       baseline_ns=nothing, baseline_ew=nothing) -> Union{ProcessedView,Nothing}
+                       baseline=nothing, ref_channel=nothing,
+                       dropout_ranges=nothing) -> Union{ProcessedView,Nothing}
 
-Convenience wrapper: build/read the canonical linear-pT [`ProcessedDay`](@ref) via
-[`get_processed`](@ref) (which caches it), then return a [`ProcessedView`](@ref) of
-it in the requested units. Units are *not* part of the cache key — only the pT
-parent is cached, and the projection happens after. Returns `nothing` when no raw
-data exists for the `(date, rx, tx)`.
+Build/read the canonical linear-pT [`ProcessedDay`](@ref) via [`get_processed`](@ref)
+(which caches it), then return a [`ProcessedView`](@ref) in the requested units. Units
+are not part of the cache key.
 """
 function get_processed_view(c::VLFCache, source_folder::AbstractString, rx, tx, date::Date,
                             params::ProcessParams; efield::Bool = false, db::Bool = false,
                             recompute::Bool = false,
-                            baseline_ns::Union{Nothing,RawDay} = nothing,
-                            baseline_ew::Union{Nothing,RawDay} = nothing,
-                            baseline_amp::Union{Nothing,RawDay} = nothing,
+                            baseline::Union{Nothing,ProcessedDay} = nothing,
+                            ref_channel::Union{Nothing,Channel} = nothing,
                             dropout_ranges::Union{Nothing,Vector{UnitRange{Int}}} = nothing)
     day = get_processed(c, source_folder, rx, tx, date, params;
-                        recompute = recompute, baseline_ns = baseline_ns,
-                        baseline_ew = baseline_ew, baseline_amp = baseline_amp, dropout_ranges=dropout_ranges)
+                        recompute = recompute, baseline = baseline,
+                        ref_channel = ref_channel, dropout_ranges = dropout_ranges)
     return day === nothing ? nothing : view_units(day; efield = efield, db = db)
 end
 
@@ -448,6 +468,37 @@ const _NET_DEFAULTS = (; drop_db = 10.0, window_s = 300.0, pad_s = 1.0,
 function _with_dropout_label(p::ProcessParams, label::AbstractString)
     base = (; (f => getfield(p, f) for f in fieldnames(ProcessParams))...)
     return ProcessParams(; merge(base, (; dropout_label = label))...)
+end
+
+"""
+    params_digest(p::ProcessParams) -> String
+
+Deterministic, field-preserving digest of a [`ProcessParams`](@ref): every field is
+stringified in declaration order, so a field added later is included automatically
+without editing here. Non-cryptographic — a stable unique representation, used to
+stamp a target with the full identity of its reference's processing.
+"""
+params_digest(p::ProcessParams) =
+    join((string(f, "=", getfield(p, f)) for f in fieldnames(ProcessParams)), ";")
+
+"""
+    baseline_label(ref::ProcessedDay, ref_channel) -> String
+
+Provenance token for a phase reference: the reference receiver/transmitter, the
+referencing mode (`RR` for per-channel NS←NS/EW←EW, else the single channel forced
+onto both), and a full [`params_digest`](@ref) of how the reference was built. Any
+difference makes a distinct cache identity for targets referenced against it.
+"""
+baseline_label(ref::ProcessedDay, ref_channel::Union{Nothing,Channel}) =
+    string(ref.rx, "@", ref.tx, "/",
+           ref_channel === nothing ? "RR" : chstr(ref_channel),
+           "/{", params_digest(ref.params), "}")
+
+# Copy of `p` with only `baseline` replaced. Field-preserving, mirroring
+# `_with_dropout_label`, so it survives future ProcessParams fields without edits.
+function _with_baseline_label(p::ProcessParams, label::AbstractString)
+    base = (; (f => getfield(p, f) for f in fieldnames(ProcessParams))...)
+    return ProcessParams(; merge(base, (; baseline = label))...)
 end
 
 """
@@ -478,40 +529,20 @@ NetworkJob(cache::VLFCache, src::AbstractString, rx, params::ProcessParams;
     NetworkJob(cache, String(src), Symbol(rx), params, detect_channel)
 
 """
-    get_processed_network(jobs::AbstractVector{NetworkJob}, tx, date;
-                          baseline_amp=nothing, baseline_ns=nothing, baseline_ew=nothing,
-                          net_kw=(;), recompute=false)
-        -> Vector{Union{ProcessedDay,Nothing}}
+    get_processed_network(jobs, tx, date;
+                          baseline=nothing, ref_channel=nothing,
+                          net_kw=(;), recompute=false) -> Vector{Union{ProcessedDay,Nothing}}
 
-Process a set of receivers of the same `tx`/`date` as a mutual transmitter-dropout
-coincidence network. Detection runs once over each job's chosen detection-channel
-amplitude (`NetworkJob.detect_channel`, default `EW`)
-([`detect_dropouts_network`](@ref)); the resulting ranges are masked into every
-target, but — per [`build_processed`](@ref)'s gating — only at samples where the
-shared near-field `baseline_amp` is itself silent (NaN), so the trusted near-field
-detector is never overridden where it has evidence.
-
-`net_kw` overrides any of the network settings (`drop_db`, `window_s`, `pad_s`,
-`min_valid`, `min_coincident`, `min_receivers`); omitted keys take `_NET_DEFAULTS`.
-`baseline_amp`/`baseline_ns`/`baseline_ew` are shared across all targets.
-
-Caching: a target is rebuilt when `recompute` is set, when it is uncached, or when
-its stored provenance differs from the current parameters (which include the network
-`dropout_label`); otherwise the cached product is honored. The coincidence detection
-is skipped entirely when every target is already cached and provenance-matched — the
-raw amplitudes are still gathered (a cache hit when raw is cached) to compute the
-label that gates that decision. Returns one entry per job in input order; an entry is
-`nothing` when that receiver has no raw data for `(date, rx, tx)`.
-
-!!! note
-    `dropout_label` records the network identity (contributing receiver codes plus
-    settings) but not the `baseline_amp` used for gating, so honoring the cache on a
-    label match assumes the same baseline across calls.
+Process a set of receivers of the same `tx`/`date` as a transmitter-dropout
+coincidence network. The shared `baseline`/`ref_channel` reference is applied to every
+target; its identity is folded into each product's provenance alongside the network
+`dropout_label`, so a target cached against one reference does not satisfy a request
+against another. Returns one entry per job in input order (`nothing` where a receiver
+has no raw data).
 """
 function get_processed_network(jobs::AbstractVector{NetworkJob}, tx, date::Date;
-                               baseline_amp::Union{Nothing,RawDay} = nothing,
-                               baseline_ns::Union{Nothing,RawDay} = nothing,
-                               baseline_ew::Union{Nothing,RawDay} = nothing,
+                               baseline::Union{Nothing,ProcessedDay} = nothing,
+                               ref_channel::Union{Nothing,Channel} = nothing,
                                net_kw = (;), recompute::Bool = false)
     txs = Symbol(tx)
     nk  = merge(_NET_DEFAULTS, net_kw)
@@ -524,8 +555,10 @@ function get_processed_network(jobs::AbstractVector{NetworkJob}, tx, date::Date;
     end
     have_network = length(amps) >= nk.min_receivers
     net_label = have_network ? network_dropout_label(amps; nk...) : ""
+    blabel    = baseline === nothing ? "" : baseline_label(baseline, ref_channel)
 
-    jparams = [_with_dropout_label(j.params, net_label) for j in jobs]
+    jparams = [_with_baseline_label(_with_dropout_label(j.params, net_label), blabel)
+               for j in jobs]
 
     cached      = Vector{Union{ProcessedDay,Nothing}}(nothing, length(jobs))
     needs_build = falses(length(jobs))
@@ -533,9 +566,9 @@ function get_processed_network(jobs::AbstractVector{NetworkJob}, tx, date::Date;
         if recompute
             needs_build[i] = true
         else
-            c = _load_entry(processed_path(jobs[i].cache, date, jobs[i].rx, txs))
-            if c isa ProcessedDay && provenance_matches(c.params, jparams[i])
-                cached[i] = c
+            cc = _load_entry(processed_path(jobs[i].cache, date, jobs[i].rx, txs))
+            if cc isa ProcessedDay && provenance_matches(cc.params, jparams[i])
+                cached[i] = cc
             else
                 needs_build[i] = true
             end
@@ -552,9 +585,8 @@ function get_processed_network(jobs::AbstractVector{NetworkJob}, tx, date::Date;
             continue
         end
         day = build_processed(jobs[i].cache, jobs[i].src, jobs[i].rx, txs, date, jparams[i];
-                              baseline_ns = baseline_ns, baseline_ew = baseline_ew,
-                              baseline_amp = baseline_amp, dropout_ranges = net_ranges,
-                              recompute = recompute)
+                              baseline = baseline, ref_channel = ref_channel,
+                              dropout_ranges = net_ranges, recompute = recompute)
         if day !== nothing
             _save_entry(processed_path(jobs[i].cache, date, jobs[i].rx, txs), day)
             _index_add_processed!(jobs[i].cache, date, jobs[i].rx, txs)

@@ -69,22 +69,30 @@ function _ranges_from_flags(flagged::AbstractVector{Bool}, pad::Integer)
 end
 
 """
-    detect_dropouts(baseline_amp::RawDay; drop_db=10.0, window_s=300.0,
+    detect_dropouts(amp::AbstractVector, Fs::Real; drop_db=10.0, window_s=300.0,
                     pad_s=1.0, min_valid=30) -> Vector{UnitRange{Int}}
 
-Single-receiver transmitter-dropout detection on a near-field baseline amplitude
-(see module notes). Unchanged in behavior; now expressed over [`_flag_drops`](@ref)
-and [`_ranges_from_flags`](@ref), which it shares with [`detect_dropouts_network`](@ref).
+Trailing-relative-drop detection on an amplitude vector with explicit `Fs`. The
+test is dB below a trailing median, so units are irrelevant — calibrated pT and raw
+counts give identical ranges. See the [`RawDay`](@ref) method for the gated form.
 """
-function detect_dropouts(baseline_amp::RawDay; drop_db::Real = 10.0,
+function detect_dropouts(amp::AbstractVector, Fs::Real; drop_db::Real = 10.0,
                          window_s::Real = 300.0, pad_s::Real = 1.0,
                          min_valid::Integer = 30)
-    adb = to_db.(baseline_amp.data)
-    flagged, _ = _flag_drops(adb, baseline_amp.Fs;
-                             drop_db = drop_db, window_s = window_s,
+    adb = to_db.(amp)
+    flagged, _ = _flag_drops(adb, Fs; drop_db = drop_db, window_s = window_s,
                              min_valid = min_valid)
-    return _ranges_from_flags(flagged, round(Int, pad_s * baseline_amp.Fs))
+    return _ranges_from_flags(flagged, round(Int, pad_s * Fs))
 end
+
+"""
+    detect_dropouts(baseline_amp::RawDay; kwargs...) -> Vector{UnitRange{Int}}
+
+Trailing-relative-drop detection on a single receiver's amplitude. Delegates to the
+vector form on `baseline_amp.data`/`baseline_amp.Fs`.
+"""
+detect_dropouts(baseline_amp::RawDay; kwargs...) =
+    detect_dropouts(baseline_amp.data, baseline_amp.Fs; kwargs...)
 
 """
     detect_dropouts_network(days::AbstractVector{RawDay}; drop_db=10.0,

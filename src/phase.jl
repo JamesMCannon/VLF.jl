@@ -176,22 +176,17 @@ function detrend_phase(target::AbstractVector,
     return out
 end
 
-# Full phase pipeline: (optional) unwrap → baseline/slope resolve → n×90° stitch.
-# Unwrapping happens here so the slope detrends the UNWRAPPED phase; stitch then
-# runs with unwrap already done. With slope === nothing and no baseline this
-# reduces exactly to the previous `stitch_phase(target; unwrap=params.unwrap)`.
-function _clean_detrend_stitch(target, baseline, params, time)
-    uw(v) = params.unwrap ? unwrap_phase(v; slope = params.slope, time = time,
-                                          max_gap = params.max_gap) :
-                            collect(float.(v))
-    tgt  = uw(target)
-    base = baseline === nothing ? nothing : uw(baseline)
-    base_s = base === nothing ? nothing :
-             stitch_phase(base; tolerance = params.tolerance, unwrap = false)
-
-    # slope anchors the unwrap above unconditionally; subtract_slope decides whether
-    # it is also removed from the phase here.
+# Full phase pipeline: (optional) unwrap target → reference/slope resolve → n×90°
+# stitch. The reference (when present) is an already-cleaned ProcessedDay channel,
+# so it is consumed verbatim — only the target is unwrapped here. `subtract_slope`
+# gates whether the anchor slope is also removed from the phase (false ⇒ the slope
+# anchors the unwrap only, the ramp is kept). With no reference and slope === nothing
+# this reduces to `stitch_phase(target; unwrap=params.unwrap)`.
+function _clean_detrend_stitch(target, reference, params, time)
+    tgt = params.unwrap ? unwrap_phase(target; slope = params.slope, time = time,
+                                       max_gap = params.max_gap) :
+                          collect(float.(target))
     detrend_slope = params.subtract_slope ? params.slope : nothing
-    cleaned = detrend_phase(tgt, base_s, detrend_slope, time)
+    cleaned = detrend_phase(tgt, reference, detrend_slope, time)
     return stitch_phase(cleaned; tolerance = params.tolerance, unwrap = false)
 end
