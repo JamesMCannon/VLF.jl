@@ -42,8 +42,12 @@ Bumped 5 → 6: ProcessParams gained `dropout_label`, a provenance string identi
 externally-supplied dropout ranges (e.g. a network-coincidence mask) that are not
 otherwise reproducible from the other fields. It changes the provenance identity of
 a cached product, so v5 entries are rebuilt rather than reinterpreted.
+
+Bumped 6 → 7: ProcessParams gained subtract_slope::Bool to indicate if the supplied slope
+should be used to detrend phase data. If `false` but a slope is provided, the slope is
+only used to anchor the unwrap (e.g. in the case of processing baseline data).
 """
-const SCHEMA_VERSION = 6
+const SCHEMA_VERSION = 7
 
 """
     Channel
@@ -153,25 +157,27 @@ Phase:
     choices (µV/m, dB) are not baked in and never need a recompute.
 """
 Base.@kwdef struct ProcessParams
-    cal_file::String   = ""
-    cal_num::Union{Float64,NamedTuple} = -1.0
-    tolerance::Float64 = 10.0
-    unwrap::Bool       = true
-    baseline::String   = ""
-    slope::Union{Nothing,Float64} = nothing
-    max_gap::Float64   = 3600      # s; gaps longer than this reset datum (no fold)
-    dropout_db::Union{Nothing,Float64} = nothing   # dB below trailing median to flag a drop; nothing ⇒ off
-    dropout_window::Float64 = 300.0                # trailing rolling-median window (s)
-    dropout_pad::Float64    = 1.0                  # dilation each side of a flagged run (s)
-    dropout_min_valid::Int  = 30                # minimum valid samples in a window to compute median
-    dropout_label::String   = ""                # provenance for externally-applied dropout ranges (e.g. a network mask); "" ⇒ none
+    cal_file::String                    = ""
+    cal_num::Union{Float64,NamedTuple}  = -1.0
+    tolerance::Float64                  = 10.0
+    unwrap::Bool                        = true
+    baseline::String                    = ""
+    slope::Union{Nothing,Float64}       = nothing
+    subtract_slope::Bool                = true      # false allows slope to anchor the unwrap without being consumed to detrend phase
+    max_gap::Float64                    = 3600      # s; gaps longer than this reset datum (no fold)
+    dropout_db::Union{Nothing,Float64}  = nothing   # dB below trailing median to flag a drop; nothing ⇒ off
+    dropout_window::Float64             = 300.0     # trailing rolling-median window (s)
+    dropout_pad::Float64                = 1.0       # dilation each side of a flagged run (s)
+    dropout_min_valid::Int              = 30        # minimum valid samples in a window to compute median
+    dropout_label::String               = ""        # provenance for externally-applied dropout ranges (e.g. a network mask); "" ⇒ none
 end
 
 "True if two parameter sets would produce the same product."
 provenance_matches(a::ProcessParams, b::ProcessParams) =
     a.cal_file == b.cal_file && a.cal_num == b.cal_num &&
     a.tolerance == b.tolerance && a.unwrap == b.unwrap &&
-    a.baseline == b.baseline && a.slope == b.slope &&
+    a.baseline == b.baseline && 
+    a.slope == b.slope && a.subtract_slope == b.subtract_slope &&
     a.max_gap == b.max_gap &&
     a.dropout_db == b.dropout_db && a.dropout_window == b.dropout_window &&
     a.dropout_pad == b.dropout_pad && a.dropout_min_valid == b.dropout_min_valid &&
