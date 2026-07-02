@@ -1,7 +1,7 @@
 # ============================================================================
 # types.jl  —  Core data model for VLF.jl
 #
-#   RawDay        : one (date, rx, tx, channel, quantity), gridded to a full
+#   RawDay        : one (date, rx, tx, rx_channel, quantity), gridded to a full
 #                   86400 s day, NaN where no sample exists. Mirrors a .mat file.
 #   ProcessedDay  : one (date, rx, tx) bundle of calibrated/cleaned products
 #                   (EW/NS/combined amplitude in pT, EW/NS cleaned phase).
@@ -57,13 +57,13 @@ distinct cache identity. v7 entries are rebuilt rather than reinterpreted.
 const SCHEMA_VERSION = 8
 
 """
-    Channel
+    RxChannel
 
 Physical antenna channel. Only the two physical channels are valid for raw
 data; `COMBINED`/`DOMINANT` are products and live as explicit fields on
 [`ProcessedDay`](@ref), so they are deliberately absent here.
 """
-@enum Channel NS EW
+@enum RxChannel NS EW
 
 """
     Quantity
@@ -87,12 +87,12 @@ i.e. `round(Int, 86400*Fs)` samples. Exact for the rates worked with:
 timegrid(Fs::Real) = range(0.0; step = 1 / Fs, length = round(Int, 86400 * Fs))
 
 # ----------------------------------------------------------------------------
-# DataKey: identifies a raw entry. (date, rx, tx, channel, quantity).
+# DataKey: identifies a raw entry. (date, rx, tx, rx_channel, quantity).
 # The filename's start-time field is intentionally NOT part of the key, so
 # multiple partial files for the same day (receiver reboots) collapse to one.
 # ----------------------------------------------------------------------------
 """
-    DataKey(date, rx, tx, channel, quantity)
+    DataKey(date, rx, tx, rx_channel, quantity)
 
 Identity of a single raw channel-day. Used as the cache key and to match
 source `.mat` files. Does not include the file start time, so partial files
@@ -102,17 +102,16 @@ struct DataKey
     date::Date
     rx::Symbol
     tx::Symbol
-    channel::Channel
+    rx_channel::RxChannel
     quantity::Quantity
 end
 
 Base.:(==)(a::DataKey, b::DataKey) =
     a.date == b.date && a.rx == b.rx && a.tx == b.tx &&
-    a.channel == b.channel && a.quantity == b.quantity
+    a.rx_channel == b.rx_channel && a.quantity == b.quantity
 
 Base.hash(k::DataKey, h::UInt) =
-    hash(k.date, hash(k.rx, hash(k.tx, hash(k.channel, hash(k.quantity, h)))))
-
+    hash(k.date, hash(k.rx, hash(k.tx, hash(k.rx_channel, hash(k.quantity, h)))))
 # ----------------------------------------------------------------------------
 # ProcessParams: provenance for a ProcessedDay. Recording these lets a load
 # warn when the cached product was built with settings other than those the
@@ -204,7 +203,7 @@ processed tier.
 - `date::Date` — UTC day this entry covers.
 - `rx::Symbol` — receiver code, e.g. `:FSI`.
 - `tx::Symbol` — transmitter code, e.g. `:NLK`.
-- `channel::Channel` — `NS` or `EW`.
+- `rx_channel::RxChannel` — `NS` or `EW`.
 - `quantity::Quantity` — `AMPLITUDE` or `PHASE`.
 - `Fc::Float64` — transmitter center frequency (Hz).
 - `Fs::Float64` — sample rate (Hz); 1.0 for narrowband, 50.0 for broadband.
@@ -218,7 +217,7 @@ struct RawDay
     date::Date
     rx::Symbol
     tx::Symbol
-    channel::Channel
+    rx_channel::RxChannel
     quantity::Quantity
     Fc::Float64
     Fs::Float64
@@ -276,7 +275,7 @@ end
 
 Horizontal magnetic flux density for one `(date, rx, tx)` expressed in the radial
 (`r̂`, away from the source) and azimuthal (`φ̂`, 90° CCW from `r̂`) frame of Gross
-et al. (2018), Eq. (5). Built from a [`ProcessedDay`](@ref) by [`rotate`](@ref).
+et al. (2018), Eq. (5). Built from a [`ProcessedDay`](@ref) by [`rotate_day`](@ref).
 All products share the parent's [`timegrid`](@ref); amplitudes are in pT, phases
 in degrees in `(-180, 180]`. A sample is valid only where *both* parent channels
 are valid, so `NaN` in either NS/EW amplitude or phase yields `NaN` in both
@@ -318,7 +317,7 @@ end
 # ----------------------------------------------------------------------------
 # String tokens used in filenames/cache names
 # ----------------------------------------------------------------------------
-chstr(c::Channel) = c === EW ? "EW" : "NS"
+chstr(c::RxChannel) = c === EW ? "EW" : "NS"
 qstr(q::Quantity) = q === AMPLITUDE ? "A" : "B"
 
 # ----------------------------------------------------------------------------
@@ -327,7 +326,7 @@ qstr(q::Quantity) = q === AMPLITUDE ? "A" : "B"
 _coverage(v) = isempty(v) ? 0.0 : 100 * count(!isnan, v) / length(v)
 
 function Base.show(io::IO, d::RawDay)
-    print(io, "RawDay($(d.rx)←$(d.tx) $(chstr(d.channel))/$(qstr(d.quantity)) ",
+    print(io, "RawDay($(d.rx)←$(d.tx) $(chstr(d.rx_channel))/$(qstr(d.quantity)) ",
           "$(d.date) | $(round(d.Fs; digits=3)) Hz, ",
           "$(round(_coverage(d.data); digits=1))% covered)")
 end
@@ -343,7 +342,7 @@ _cov(v) = string(round(_coverage(v); digits = 1), "%")
 
 function Base.show(io::IO, ::MIME"text/plain", d::RawDay)
     println(io, "RawDay: ", d.rx, " ← ", d.tx, "   ",
-            chstr(d.channel), "/", qstr(d.quantity), "   ", d.date)
+            chstr(d.rx_channel), "/", qstr(d.quantity), "   ", d.date)
     println(io, "  Fc       = ", d.Fc, " Hz")
     println(io, "  Fs       = ", d.Fs, " Hz")
     println(io, "  time     = ", d.time, "  (", length(d.time), " samples)")

@@ -203,7 +203,7 @@ the *same* `amps` and keyword values to keep them consistent.
 function network_dropout_label(amps::AbstractVector{RawDay};
                                drop_db, window_s, pad_s, min_valid,
                                min_coincident, min_receivers)
-    rxs = join(sort([string(a.rx) * ":" * chstr(a.channel) for a in amps]), ",")
+    rxs = join(sort([string(a.rx) * ":" * chstr(a.rx_channel) for a in amps]), ",")
     mc  = min_coincident === nothing ? "all" : string(min_coincident)
     return "network[$rxs];db=$drop_db,win=$window_s,pad=$pad_s," *
            "mv=$min_valid,mc=$mc,mr=$min_receivers"
@@ -235,6 +235,6 @@ function mask_dropouts(day::RawDay, ranges)
     for r in ranges
         @views d[r] .= NaN
     end
-    return RawDay(day.date, day.rx, day.tx, day.channel, day.quantity,
+    return RawDay(day.date, day.rx, day.tx, day.rx_channel, day.quantity,
                   day.Fc, day.Fs, day.time, d)
 end

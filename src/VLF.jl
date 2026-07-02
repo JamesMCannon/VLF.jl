@@ -13,7 +13,7 @@ include("process.jl")
 include("rotate.jl")
 
 # --- data model ---
-export Channel, NS, EW
+export RxChannel, NS, EW
 export Quantity, AMPLITUDE, PHASE
 export DataKey, RawDay, ProcessedDay, ProcessParams
 export TimeGrid, timegrid, SCHEMA_VERSION
@@ -35,6 +35,6 @@ export RotatedJob, get_rotated_network
 export NetworkJob, network_dropout_label 
 export ProcessedView, AmplitudeUnits, view_units, unit_label
 export detect_dropouts, mask_dropouts, detect_dropouts_network, mask_dropouts_network
-export rotate, baseline_subtract, RotatedDay
+export rotate_day, baseline_subtract, RotatedDay
 
 end # module VLF

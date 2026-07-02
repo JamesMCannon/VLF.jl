@@ -1,16 +1,14 @@
 # ============================================================================
 # mat.jl  —  Reading source .mat files and gridding them into RawDay.
 #
-# Two filename formats are supported, detected from the name itself (NOT from a
-# hardcoded list of which receivers are which — a site that changes software
-# simply starts matching the other pattern):
+# Two filename formats are supported, detected from the name itself:
 #
-#   AVID (11 receivers):   FSI250601000000_NLK_EW_A.mat
-#                          rx date(yymmdd) time(hhmmss) _ tx _ ch(EW|NS) _ q(A|B)
+#   AVID:       FSI250601000000_NLK_EW_A.mat
+#               rx date(yymmdd) time(hhmmss) _ tx _ ch(EW|NS) _ q(A|B)
 #
-#   AWESOME (2 receivers): JU250701000000NLK_100A.mat
-#                          rx date(yymmdd) time(hhmmss) tx _ ch(100|101) q(A|B)
-#                          with 100 -> EW, 101 -> NS
+#   AWESOME:    JU250701000000NLK_100A.mat
+#               rx date(yymmdd) time(hhmmss) tx _ ch(100|101) q(A|B)
+#               with 100 -> EW, 101 -> NS
 #
 # Both formats have identical .mat internals, so a single reader handles all 13.
 # ============================================================================
@@ -18,9 +16,9 @@
 const RE_AVID = r"^(?<rx>[A-Z]+)(?<date>\d{6})(?<time>\d{6})_(?<tx>[A-Z]+)_(?<ch>EW|NS)_(?<q>[AB])\.mat$"
 const RE_AWESOME = r"^(?<rx>[A-Z]+)(?<date>\d{6})(?<time>\d{6})(?<tx>[A-Z]+)_(?<ch>10[01])(?<q>[AB])\.mat$"
 
-_channel_from_token(t) = (t == "EW" || t == "100") ? EW :
-                         (t == "NS" || t == "101") ? NS :
-                         error("Unrecognized channel token: $t")
+_rx_channel_from_token(t) = (t == "EW" || t == "100") ? EW :
+                            (t == "NS" || t == "101") ? NS :
+                            error("Unrecognized channel token: $t")
 
 _quantity_from_token(t) = t == "A" ? AMPLITUDE :
                          t == "B" ? PHASE :
@@ -44,7 +42,7 @@ function parse_filename(fname::AbstractString)
     date = Date(2000 + yy, mm, dd)
 
     return DataKey(date, Symbol(m[:rx]), Symbol(m[:tx]),
-                   _channel_from_token(m[:ch]), _quantity_from_token(m[:q]))
+                   _rx_channel_from_token(m[:ch]), _quantity_from_token(m[:q]))
 end
 
 """
@@ -141,6 +139,6 @@ function build_rawday(folder::AbstractString, key::DataKey)
         data[lo:hi] .= @view p.data[(lo-base+1):(hi-base+1)]
     end
 
-    return RawDay(key.date, key.rx, key.tx, key.channel, key.quantity,
+    return RawDay(key.date, key.rx, key.tx, key.rx_channel, key.quantity,
                   Fc, Fs, timegrid(Fs), data)
 end

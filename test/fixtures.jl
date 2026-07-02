@@ -4,7 +4,7 @@
 #
 # Field set matches what VLF.read_mat_partial reads:
 #   start_hour, start_minute, start_second, Fs, Fc, data
-# (date / rx / tx / channel / quantity come from the FILENAME, not contents.)
+# (date / rx / tx / rx_channel / quantity come from the FILENAME, not contents.)
 # ============================================================================
 
 using MAT

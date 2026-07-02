@@ -41,7 +41,7 @@ end
 
 # --- entry paths (deterministic from key) ----------------------------------
 _raw_name(k::DataKey) = string(Dates.format(k.date, "yymmdd"), "_", k.rx, "_",
-                               k.tx, "_", chstr(k.channel), "_", qstr(k.quantity), ".jld2")
+                               k.tx, "_", chstr(k.rx_channel), "_", qstr(k.quantity), ".jld2")
 _proc_name(date, rx, tx) = string(Dates.format(date, "yymmdd"), "_", rx, "_", tx, ".jld2")
 
 raw_path(c::VLFCache, k::DataKey) = joinpath(c.root, "raw", _raw_name(k))
@@ -119,7 +119,7 @@ end
 Write `day` to the cache and record it in the index. Returns the path.
 """
 function save_raw(c::VLFCache, day::RawDay)
-    k = DataKey(day.date, day.rx, day.tx, day.channel, day.quantity)
+    k = DataKey(day.date, day.rx, day.tx, day.rx_channel, day.quantity)
     p = _save_entry(raw_path(c, k), day)
     _index_add_raw!(c, k)
     return p

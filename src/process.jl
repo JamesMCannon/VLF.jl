@@ -12,8 +12,8 @@
 #     caller falls through to `cal_file` (returns `nothing`).
 #   * A NamedTuple selects per channel by name (:EW / :NS). It is always treated
 #     as "set" and must contain the key for the channel being calibrated.
-_cal_num_for(cal_num::Real, ::Channel) = cal_num == -1.0 ? nothing : float(cal_num)
-function _cal_num_for(cal_num::NamedTuple, ch::Channel)
+_cal_num_for(cal_num::Real, ::RxChannel) = cal_num == -1.0 ? nothing : float(cal_num)
+function _cal_num_for(cal_num::NamedTuple, ch::RxChannel)
     name = Symbol(chstr(ch))            # :EW or :NS
     haskey(cal_num, name) ||
         error("Per-channel cal_num has no entry for the $name channel (keys: $(keys(cal_num))).")
@@ -25,20 +25,20 @@ end
 
 Counts→pT scale factor for `amp_day`'s channel. Uses `params.cal_num` when set:
 a scalar applies to both channels, while a NamedTuple `(EW = …, NS = …)` selects
-the factor for `amp_day.channel`. A scalar `-1.0` (the unset sentinel) instead
-reads `params.cal_file`, selects the NS/EW curve by `amp_day.channel`, and takes
+the factor for `amp_day.rx_channel`. A scalar `-1.0` (the unset sentinel) instead
+reads `params.cal_file`, selects the NS/EW curve by `amp_day.rx_channel`, and takes
 the response at the frequency nearest `amp_day.Fc` (cal-file frequencies are in
 kHz). A NamedTuple `cal_num` always takes precedence over `cal_file`.
 """
 function calibration_factor(amp_day::RawDay, params::ProcessParams)
-    cn = _cal_num_for(params.cal_num, amp_day.channel)
+    cn = _cal_num_for(params.cal_num, amp_day.rx_channel)
     if cn !== nothing
         return cn
     elseif !isempty(params.cal_file) && params.cal_file != "default"
         mf = matopen(params.cal_file)
         try
-            curve = amp_day.channel === NS ? read(mf, "CalibrationNumberNS") :
-                                              read(mf, "CalibrationNumberEW")
+            curve = amp_day.rx_channel === NS ? read(mf, "CalibrationNumberNS") :
+                                                 read(mf, "CalibrationNumberEW")
             freqs = abs.(curve[:, 1])           # kHz
             resp  = abs.(curve[:, 2])
             idx = argmin(abs.(freqs .* 1000 .- amp_day.Fc))
@@ -275,7 +275,7 @@ dropouts), or a tx/date/grid mismatch.
 function build_processed(c::VLFCache, source_folder::AbstractString, rx, tx, date::Date,
                          params::ProcessParams;
                          baseline::Union{Nothing,ProcessedDay} = nothing,
-                         ref_channel::Union{Nothing,Channel} = nothing,
+                         ref_channel::Union{Nothing,RxChannel} = nothing,
                          dropout_ranges::Union{Nothing,Vector{UnitRange{Int}}} = nothing,
                          recompute::Bool = false)
     rxs, txs = Symbol(rx), Symbol(tx)
@@ -413,7 +413,7 @@ provenance differs is returned with a warning (pass `recompute=true` to rebuild)
 function get_processed(c::VLFCache, source_folder::AbstractString, rx, tx, date::Date,
                        params::ProcessParams; recompute::Bool = false,
                        baseline::Union{Nothing,ProcessedDay} = nothing,
-                       ref_channel::Union{Nothing,Channel} = nothing,
+                       ref_channel::Union{Nothing,RxChannel} = nothing,
                        dropout_ranges::Union{Nothing,Vector{UnitRange{Int}}} = nothing)
     stamped = _with_baseline_label(params,
                   baseline === nothing ? "" : baseline_label(baseline, ref_channel))
@@ -449,7 +449,7 @@ function get_processed_view(c::VLFCache, source_folder::AbstractString, rx, tx, 
                             params::ProcessParams; efield::Bool = false, db::Bool = false,
                             recompute::Bool = false,
                             baseline::Union{Nothing,ProcessedDay} = nothing,
-                            ref_channel::Union{Nothing,Channel} = nothing,
+                            ref_channel::Union{Nothing,RxChannel} = nothing,
                             dropout_ranges::Union{Nothing,Vector{UnitRange{Int}}} = nothing)
     day = get_processed(c, source_folder, rx, tx, date, params;
                         recompute = recompute, baseline = baseline,
@@ -497,7 +497,7 @@ referencing mode (`RR` for per-channel NS←NS/EW←EW, else the single channel 
 onto both), and a full [`params_digest`](@ref) of how the reference was built. Any
 difference makes a distinct cache identity for targets referenced against it.
 """
-baseline_label(ref::ProcessedDay, ref_channel::Union{Nothing,Channel}) =
+baseline_label(ref::ProcessedDay, ref_channel::Union{Nothing,RxChannel}) =
     string(ref.rx, "@", ref.tx, "/",
            ref_channel === nothing ? "RR" : chstr(ref_channel),
            "/{", params_digest(ref.params), "}")
@@ -530,17 +530,17 @@ struct NetworkJob
     src::String
     rx::Symbol
     params::ProcessParams
-    detect_channel::Channel
+    detect_channel::RxChannel
 end
 NetworkJob(cache::VLFCache, src::AbstractString, rx, params::ProcessParams;
-           detect_channel::Channel = EW) = NetworkJob(cache, String(src), Symbol(rx), params, detect_channel)
+           detect_channel::RxChannel = EW) = NetworkJob(cache, String(src), Symbol(rx), params, detect_channel)
 
 """
     RotatedJob(job::NetworkJob, bearing_deg; polarity=(NS=1, EW=-1), offset_m=0)
 
 One receiver's rotation convention, paired with its frame-agnostic processing
 inputs (`job`). `NetworkJob` carries no geometry or channel-orientation
-information, so this bundles the per-receiver quantities [`rotate`](@ref) needs —
+information, so this bundles the per-receiver quantities [`rotate_day`](@ref) needs —
 `bearing_deg` (the rx→tx forward azimuth, degrees clockwise from true north),
 `polarity` (antenna wiring sign; the Gross convention `(NS=1, EW=-1)` is the
 default), and `offset_m` (the demodulation quarter-turn `u_rel`; `0` for
@@ -578,7 +578,7 @@ has no raw data).
 """
 function get_processed_network(jobs::AbstractVector{NetworkJob}, tx, date::Date;
                                baseline::Union{Nothing,ProcessedDay} = nothing,
-                               ref_channel::Union{Nothing,Channel} = nothing,
+                               ref_channel::Union{Nothing,RxChannel} = nothing,
                                net_kw = (;), recompute::Bool = false)
     txs = Symbol(tx)
     nk  = merge(_NET_DEFAULTS, net_kw)
@@ -702,7 +702,7 @@ function get_rotated_network(jobs::AbstractVector{RotatedJob}, reference::Rotate
         ref_Fs = ref_ew.Fs
     elseif ref_ew !== nothing || ref_ns !== nothing
         ch = ref_ew !== nothing ? ref_ew : ref_ns
-        @warn "reference has one amplitude channel ($(chstr(ch.channel))); near-field \
+        @warn "reference has one amplitude channel ($(chstr(ch.rx_channel))); near-field \
                detection uses it alone (quadrature unavailable) and the reference cannot \
                be rotated — differencing will fall back to slope-detrend." rx=rj.rx tx=txs date
         ref_evidence = calibrate(ch, rj.params)
@@ -731,7 +731,7 @@ function get_rotated_network(jobs::AbstractVector{RotatedJob}, reference::Rotate
 
     R_ref = nothing
     if ref_day !== nothing
-        R = rotate(ref_day, reference.bearing_deg;
+        R = rotate_day(ref_day, reference.bearing_deg;
                    polarity = reference.polarity, offset_m = reference.offset_m)
         if count(!isnan, R.Bazi_amp) == 0
             @warn "rotated reference has no valid samples (a rotated sample needs both \
@@ -810,7 +810,7 @@ function get_rotated_network(jobs::AbstractVector{RotatedJob}, reference::Rotate
                           dropout_ranges = unified_ranges, recompute = recompute)
         d === nothing && continue
 
-        R = rotate(d, j.bearing_deg; polarity = j.polarity, offset_m = j.offset_m)
+        R = rotate_day(d, j.bearing_deg; polarity = j.polarity, offset_m = j.offset_m)
 
         if R_ref !== nothing
             results[i] = baseline_subtract(R, R_ref)

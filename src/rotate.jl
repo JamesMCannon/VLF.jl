@@ -1,5 +1,5 @@
 """
-    rotate(day::ProcessedDay, bearing_deg; polarity=(NS=1, EW=-1), offset_m=0, baseline_label="") -> RotatedDay
+    rotate_day(day::ProcessedDay, bearing_deg; polarity=(NS=1, EW=-1), offset_m=0, baseline_label="") -> RotatedDay
 
 Rotate `day`'s NS/EW horizontal phasors into the radial/azimuthal frame of Gross
 et al. (2018), Eq. (5). `bearing_deg` is `θ_az` (rx→tx, degrees clockwise from
@@ -19,13 +19,13 @@ to anchor the unwrap leaves the rotated phase absolute, since whole-turn folds
 vanish under rotation. Amplitudes and the ratio ∠(−B_r/B_azi) are unaffected
 either way.
 """
-function rotate(day::ProcessedDay, bearing_deg::Real;
-                polarity::NamedTuple = (NS = 1, EW = -1),
-                offset_m::Integer = 0,
-                baseline_label::AbstractString = "")
+function rotate_day(day::ProcessedDay, bearing_deg::Real;
+                    polarity::NamedTuple = (NS = 1, EW = -1),
+                    offset_m::Integer = 0,
+                    baseline_label::AbstractString = "")
     detrended = day.params.slope !== nothing && day.params.subtract_slope
     if !isempty(day.params.baseline) || detrended
-        @warn "rotate: parent phase is referenced/detrended (baseline=\"$(day.params.baseline)\", \
+        @warn "rotate_day: parent phase is referenced/detrended (baseline=\"$(day.params.baseline)\", \
                slope=$(day.params.slope), subtract_slope=$(day.params.subtract_slope)); \
                rotated phases inherit it and are not absolute." day.rx day.tx day.date
     end
