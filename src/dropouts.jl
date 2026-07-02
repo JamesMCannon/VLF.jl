@@ -68,6 +68,17 @@ function _ranges_from_flags(flagged::AbstractVector{Bool}, pad::Integer)
     return ranges
 end
 
+# Ranges → boolean mask (inverse direction of _ranges_from_flags). Used to compose
+# two independently-detected range sets (near-field ∪ coincidence-where-the-
+# reference-is-silent) before re-extracting merged ranges.
+function _ranges_to_mask(ranges::AbstractVector{<:UnitRange}, n::Integer)
+    m = falses(n)
+    for r in ranges
+        @views m[r] .= true
+    end
+    return m
+end
+
 """
     detect_dropouts(amp::AbstractVector, Fs::Real; drop_db=10.0, window_s=300.0,
                     pad_s=1.0, min_valid=30) -> Vector{UnitRange{Int}}

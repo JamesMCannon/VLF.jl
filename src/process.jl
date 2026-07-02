@@ -463,6 +463,14 @@ end
 const _NET_DEFAULTS = (; drop_db = 10.0, window_s = 300.0, pad_s = 1.0, 
                          min_valid = 30, min_coincident = nothing, min_receivers = 2)
 
+# Defaults for get_rotated_network's two-arm corroborated mask. near_field_db is
+# tight (the reference's ground wave is stable to ≲0.1 dB); coincidence_db is the
+# conservative far-field backstop (see the epistemic-status warning on
+# detect_dropouts_network). Remaining keys are shared by both arms.
+const _ROTATED_NET_DEFAULTS = (; near_field_db = 2.0, coincidence_db = 10.0,
+                                 window_s = 300.0, pad_s = 1.0, min_valid = 30,
+                                 min_coincident = nothing, min_receivers = 2)
+
 # Copy of `p` with only `dropout_label` replaced. Field-preserving, so it survives
 # future ProcessParams fields without edits here.
 function _with_dropout_label(p::ProcessParams, label::AbstractString)
@@ -525,9 +533,37 @@ struct NetworkJob
     detect_channel::Channel
 end
 NetworkJob(cache::VLFCache, src::AbstractString, rx, params::ProcessParams;
-           detect_channel::Channel = EW) =
-    NetworkJob(cache, String(src), Symbol(rx), params, detect_channel)
+           detect_channel::Channel = EW) = NetworkJob(cache, String(src), Symbol(rx), params, detect_channel)
 
+"""
+    RotatedJob(job::NetworkJob, bearing_deg; polarity=(NS=1, EW=-1), offset_m=0)
+
+One receiver's rotation convention, paired with its frame-agnostic processing
+inputs (`job`). `NetworkJob` carries no geometry or channel-orientation
+information, so this bundles the per-receiver quantities [`rotate`](@ref) needs —
+`bearing_deg` (the rx→tx forward azimuth, degrees clockwise from true north),
+`polarity` (antenna wiring sign; the Gross convention `(NS=1, EW=-1)` is the
+default), and `offset_m` (the demodulation quarter-turn `u_rel`; `0` for
+synchronous demodulation, resolved from the γ ladder for asynchronous) — the same
+way `NetworkJob` bundles a receiver's cache/source/params against the
+misalignment risk of parallel vectors.
+
+A synchronously-demodulated, Gross-wired receiver needs only `bearing_deg`
+(`polarity` and `offset_m` at their defaults). An asynchronously-demodulated or
+unknown-wiring receiver requires an `offset_m` resolved beforehand (e.g. via a
+single- or multi-transmitter γ-minimization), since no default is a correct
+assumption for a receiver whose relative channel offset hasn't been measured.
+"""
+struct RotatedJob
+    job::NetworkJob
+    bearing_deg::Float64
+    polarity::NamedTuple
+    offset_m::Int
+end
+RotatedJob(job::NetworkJob, bearing_deg::Real;
+          polarity::NamedTuple = (NS = 1, EW = -1),
+          offset_m::Integer = 0) =
+    RotatedJob(job, float(bearing_deg), polarity, Int(offset_m))    
 """
     get_processed_network(jobs, tx, date;
                           baseline=nothing, ref_channel=nothing,
@@ -592,6 +628,199 @@ function get_processed_network(jobs::AbstractVector{NetworkJob}, tx, date::Date;
             _index_add_processed!(jobs[i].cache, date, jobs[i].rx, txs)
         end
         results[i] = day
+    end
+    return results
+end
+
+"""
+    get_rotated_network(jobs::AbstractVector{RotatedJob}, reference::RotatedJob, tx, date::Date;
+                        net_kw=(;), recompute=false) -> Vector{Union{RotatedDay,Nothing}}
+
+Process a set of receivers of the same `tx`/`date` into rotated, near-field-
+referenced path differentials, with transmitter-dropout masking applied at the
+[`ProcessedDay`](@ref) level so the anchored unwrap and n×90° stitch operate across
+NaN'd dropout boundaries instead of threading through garbage samples (a surviving
+mis-stitch would rotate power between B_r and B_azi and corrupt every differential
+downstream — the reason detection evidence must come from UPSTREAM of phase
+cleaning).
+
+Two-pass reference handling (Pipeline B):
+1. The reference's raw amplitude channels are calibrated and combined in quadrature
+   (`sqrt(NS² + EW²)`, in pT — equal to `sqrt(B_r² + B_azi²)` by the orthogonality
+   of rotation, so it carries the full TM-dominant signal with no phase, stitch, or
+   offset dependency). Near-field detection runs on this evidence at
+   `near_field_db`. A single-channel reference detects on that channel alone.
+2. The reference's ProcessedDay is then built WITH those ranges as
+   `dropout_ranges`, so its own phase is stitched behind its own mask, and only
+   then rotated (`reference.bearing_deg/polarity/offset_m`; `offset_m` must be
+   resolved beforehand — this function does not resolve it).
+
+Network-coincidence arm: each job's `detect_channel` raw amplitude at
+`coincidence_db` via [`detect_dropouts_network`](@ref), admitted only where the
+reference EVIDENCE is silent (`NaN` in the pre-mask calibrated quadrature — i.e.
+the reference was not recording; its own detected dropouts are already near-field-
+covered). The reference does not vote in this arm. The composed ranges mask every
+target identically — this is transmitter-dropout masking, a shared event, not
+per-receiver noise masking.
+
+Differencing: each target is rotated with its own convention and differenced
+against the rotated reference ([`baseline_subtract`](@ref)). Detection and
+differencing degrade independently: a reference that cannot be rotated (single
+channel, or no valid rotated samples) still supplies near-field masking, with
+differencing falling back per target to its carrier slope
+(`job.job.params.slope`; a detrend, not source-phase cancellation — see the
+`slope::Real` [`baseline_subtract`](@ref) method). A target with no slope either
+is returned as an absolute rotated product, with a warning.
+
+All receivers must share `Fs`/grid length (the mask is index ranges applied
+verbatim across grids; a rate mismatch would silently misalign it, so it errors).
+`reference.job.params.dropout_db` should be `nothing` (warned otherwise): the
+near-field arm IS the reference's dropout detection, and a pre-masked evidence
+amplitude under-detects. Slope/`subtract_slope` mismatches between targets and
+reference warn, mirroring [`build_processed`](@ref)'s convention checks.
+
+Returns one entry per job in input order (`nothing` where a target has no raw
+data).
+"""
+function get_rotated_network(jobs::AbstractVector{RotatedJob}, reference::RotatedJob,
+                             tx, date::Date; net_kw = (;), recompute::Bool = false)
+    txs = Symbol(tx)
+    nk  = merge(_ROTATED_NET_DEFAULTS, net_kw)
+    rj  = reference.job
+
+    rj.params.dropout_db === nothing ||
+        @warn "reference built with dropout_db set; its pre-masked amplitude under-detects \
+               the near-field arm." rx=rj.rx tx=txs date
+
+    # --- pass 1: reference amplitude evidence (calibrated, un-rotated, pre-mask) --
+    ref_ew = get_raw(rj.cache, rj.src, DataKey(date, rj.rx, txs, EW, AMPLITUDE); recompute = recompute)
+    ref_ns = get_raw(rj.cache, rj.src, DataKey(date, rj.rx, txs, NS, AMPLITUDE); recompute = recompute)
+
+    local ref_evidence, ref_Fs
+    if ref_ew !== nothing && ref_ns !== nothing
+        ref_evidence = combine_quadrature(calibrate(ref_ns, rj.params), calibrate(ref_ew, rj.params))
+        ref_Fs = ref_ew.Fs
+    elseif ref_ew !== nothing || ref_ns !== nothing
+        ch = ref_ew !== nothing ? ref_ew : ref_ns
+        @warn "reference has one amplitude channel ($(chstr(ch.channel))); near-field \
+               detection uses it alone (quadrature unavailable) and the reference cannot \
+               be rotated — differencing will fall back to slope-detrend." rx=rj.rx tx=txs date
+        ref_evidence = calibrate(ch, rj.params)
+        ref_Fs = ch.Fs
+    else
+        @warn "no reference amplitude for ($txs, $date); network-coincidence-only masking \
+               and per-target slope-detrend (no source-phase cancellation)." rx=rj.rx
+        ref_evidence = nothing
+        ref_Fs = nothing
+    end
+
+    nf_ranges = ref_evidence === nothing ? UnitRange{Int}[] :
+                detect_dropouts(ref_evidence, ref_Fs; drop_db = nk.near_field_db,
+                                window_s = nk.window_s, pad_s = nk.pad_s,
+                                min_valid = nk.min_valid)
+
+    # --- pass 2: reference ProcessedDay stitched behind its own mask, then rotated
+    nf_label = ref_evidence === nothing ? "" :
+        string("nearfield[self;db=", nk.near_field_db, ",win=", nk.window_s,
+               ",pad=", nk.pad_s, ",mv=", nk.min_valid, "]")
+
+    ref_day = ref_evidence === nothing ? nothing :
+              get_processed(rj.cache, rj.src, rj.rx, txs, date,
+                            _with_dropout_label(rj.params, nf_label);
+                            dropout_ranges = nf_ranges, recompute = recompute)
+
+    R_ref = nothing
+    if ref_day !== nothing
+        R = rotate(ref_day, reference.bearing_deg;
+                   polarity = reference.polarity, offset_m = reference.offset_m)
+        if count(!isnan, R.Bazi_amp) == 0
+            @warn "rotated reference has no valid samples (a rotated sample needs both \
+                   channels' amplitude AND phase); near-field masking retained, differencing \
+                   falls back to slope-detrend." rx=rj.rx tx=txs date
+        else
+            R_ref = R
+        end
+    end
+
+    # --- coincidence arm: target raw detect_channel amplitudes; reference excluded
+    amps = RawDay[]
+    for j in jobs
+        a = get_raw(j.job.cache, j.job.src,
+                    DataKey(date, j.job.rx, txs, j.job.detect_channel, AMPLITUDE);
+                    recompute = recompute)
+        a === nothing || push!(amps, a)
+    end
+
+    if !isempty(amps) && ref_evidence !== nothing
+        (isapprox(ref_Fs, amps[1].Fs; rtol = 1e-9) &&
+         length(ref_evidence) == length(amps[1].data)) ||
+            error("get_rotated_network: reference grid (Fs=$ref_Fs, n=$(length(ref_evidence))) \
+                   ≠ target grid (Fs=$(amps[1].Fs), n=$(length(amps[1].data))) — the mask \
+                   cannot be applied across receivers on different grids.")
+    end
+
+    have_network = length(amps) >= nk.min_receivers
+    net_ranges = have_network ?
+                 detect_dropouts_network(amps; drop_db = nk.coincidence_db,
+                                         window_s = nk.window_s, pad_s = nk.pad_s,
+                                         min_valid = nk.min_valid,
+                                         min_coincident = nk.min_coincident,
+                                         min_receivers = nk.min_receivers) :
+                 UnitRange{Int}[]
+
+    # --- compose: near-field ∪ (coincidence where the reference evidence is silent)
+    n = ref_evidence !== nothing ? length(ref_evidence) :
+        !isempty(amps)           ? length(amps[1].data) : 0
+    unified_ranges = UnitRange{Int}[]
+    if n > 0
+        mask = _ranges_to_mask(nf_ranges, n)
+        if !isempty(net_ranges)
+            gate = ref_evidence === nothing ? trues(n) : isnan.(ref_evidence)
+            mask .|= _ranges_to_mask(net_ranges, n) .& gate
+        end
+        unified_ranges = _ranges_from_flags(mask, 0)
+    end
+
+    corroboration_label = string("rotated_net[ref=",
+        ref_evidence === nothing ? "none" :
+            string(rj.rx, ";evq;db=", nk.near_field_db),
+        have_network ?
+            ";" * network_dropout_label(amps; drop_db = nk.coincidence_db,
+                                        window_s = nk.window_s, pad_s = nk.pad_s,
+                                        min_valid = nk.min_valid,
+                                        min_coincident = nk.min_coincident,
+                                        min_receivers = nk.min_receivers) :
+            ";coincidence=none",
+        "]")
+
+    # --- build (masked), rotate, difference each target ------------------------
+    results = Vector{Union{RotatedDay,Nothing}}(nothing, length(jobs))
+    for (i, j) in enumerate(jobs)
+        if R_ref !== nothing
+            j.job.params.subtract_slope &&
+                @warn "target built with subtract_slope=true; differential keeps a residual \
+                       slope·t." rx=j.job.rx tx=txs date
+            j.job.params.slope == rj.params.slope ||
+                @warn "target slope $(j.job.params.slope) ≠ reference slope \
+                       $(rj.params.slope)." rx=j.job.rx tx=txs date
+        end
+
+        d = get_processed(j.job.cache, j.job.src, j.job.rx, txs, date,
+                          _with_dropout_label(j.job.params, corroboration_label);
+                          dropout_ranges = unified_ranges, recompute = recompute)
+        d === nothing && continue
+
+        R = rotate(d, j.bearing_deg; polarity = j.polarity, offset_m = j.offset_m)
+
+        if R_ref !== nothing
+            results[i] = baseline_subtract(R, R_ref)
+        elseif j.job.params.slope !== nothing
+            results[i] = baseline_subtract(R, j.job.params.slope)
+        else
+            @warn "no rotatable reference and no target slope; returning absolute rotated \
+                   product (masked, undifferenced)." rx=j.job.rx tx=txs date
+            results[i] = R
+        end
     end
     return results
 end

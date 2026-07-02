@@ -283,12 +283,19 @@ are valid, so `NaN` in either NS/EW amplitude or phase yields `NaN` in both
 rotated components.
 
 `bearing_deg` is `θ_az`: the rx→tx forward azimuth, degrees clockwise from true
-north. `polarity` is the per-channel ±1 applied to each reconstructed phasor;
-the default `(NS = 1, EW = -1)` reproduces Gross's stated winding (the −ŷ EW
-surface vector carries the minus sign). `baseline_label` is `""` for an absolute
+north. `polarity` is the per-receiver antenna wiring sign applied to each
+reconstructed phasor before rotation; the default `(NS = 1, EW = -1)` is the Gross
+convention. `offset_m ∈ {0,1,2,3}` is the per-receiver demodulation quarter-turn
+(`u_rel`) applied as `+90·offset_m°` on the EW phase before rotation — `0` for
+synchronous demodulation, resolved from the TM-leakage γ ladder for asynchronous.
+`polarity` and `offset_m` are independent corrections: `polarity` carries a known
+antenna sign (real, ±1 on each channel individually), `offset_m` carries the
+demodulation-driven relative factor (any quarter-turn, including ±90°, which no
+real wiring sign can produce). `baseline_label` is `""` for an absolute
 (un-referenced) product and names the reference receiver after
 [`baseline_subtract`](@ref). `params` is carried through from the parent for
-provenance.
+provenance; neither `polarity` nor `offset_m` is stored there, since both act only
+at rotation and never alter the parent `ProcessedDay`.
 """
 struct RotatedDay
     date::Date
@@ -302,7 +309,8 @@ struct RotatedDay
     Bazi_amp::Vector{Float64}   # pT
     Br_pha::Vector{Float64}     # deg, (-180, 180]
     Bazi_pha::Vector{Float64}   # deg, (-180, 180]
-    polarity::NamedTuple        # (NS = +1, EW = -1) default
+    polarity::NamedTuple        # per-receiver wiring sign (NS, EW), each ±1
+    offset_m::Int               # per-receiver demod quarter-turn u_rel ∈ {0,1,2,3}
     params::ProcessParams
     baseline_label::String
 end
