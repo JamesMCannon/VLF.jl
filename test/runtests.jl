@@ -462,22 +462,28 @@ end
         # 3b: baseline valid for samples 1..5 (R=50), dropout 6..10. Reference is
         # extrapolated from R0=50 at t0=4s, so the fill is continuous with the
         # cleaned value 50 (no +40 jump that an absolute detrend would produce).
-        g  = timegrid(1.0)
-        bl = fill(NaN, length(g)); bl[1:5] .= 50.0
-        base_ew = RawDay(Date(2025,6,1), :REF, :NLK, EW, PHASE, 24.8e3, 1.0, g, bl)
+        g  = timegrid(1.0); n = length(g)
+        bl = fill(NaN, n); bl[1:5] .= 50.0
+        # The reference is carried as a ProcessedDay whose EW phase holds `bl`;
+        # ref_channel = EW forces that single reference channel onto the target EW.
+        # Amplitudes are unused here (no dropout_db), so they are NaN. The reference
+        # slope tracks the target so the slope-convention check stays silent.
+        ref_day(p) = ProcessedDay(Date(2025,6,1), :REF, :NLK, 24.8e3, 1.0, g,
+                                  fill(NaN, n), fill(NaN, n), fill(NaN, n),
+                                  bl, fill(NaN, n), p)
 
-        d3b = build_processed(cache, dir, :FSI, :NLK, Date(2025,6,1),
-                              ProcessParams(cal_num=1.0, slope=2.0, unwrap=false);
-                              baseline_ew = base_ew)
+        p3b = ProcessParams(cal_num=1.0, slope=2.0, unwrap=false)
+        d3b = build_processed(cache, dir, :FSI, :NLK, Date(2025,6,1), p3b;
+                              baseline = ref_day(p3b), ref_channel = EW)
         @test d3b.EW_pha[5]  == 50.0                     # 100 - 50 (baseline valid)
         @test d3b.EW_pha[6]  == 100.0 - (50.0 + 2.0*(5-4))   # = 48, continuous
         @test d3b.EW_pha[10] == 100.0 - (50.0 + 2.0*(9-4))   # = 40
         @test d3b.EW_pha[6] - d3b.EW_pha[5] == -2.0      # no discontinuity at entry
 
         # 3b with no slope -> NaN across the baseline dropout
-        d3b0 = build_processed(cache, dir, :FSI, :NLK, Date(2025,6,1),
-                               ProcessParams(cal_num=1.0, unwrap=false);
-                               baseline_ew = base_ew)
+        p3b0 = ProcessParams(cal_num=1.0, unwrap=false)
+        d3b0 = build_processed(cache, dir, :FSI, :NLK, Date(2025,6,1), p3b0;
+                               baseline = ref_day(p3b0), ref_channel = EW)
         @test d3b0.EW_pha[5] == 50.0
         @test isnan(d3b0.EW_pha[6]) && isnan(d3b0.EW_pha[10])
     end
@@ -672,10 +678,17 @@ end
         @test !isempty(r1[1].params.dropout_label)                   # provenance recorded
 
         # Baseline recording across the drop ⇒ network suppressed there (Note 2).
-        g = timegrid(1.0)
-        bamp = RawDay(date, :REF, :NLK, EW, AMPLITUDE, 24.8e3, 1.0, g, fill(100.0, length(g)))
+        # The reference is a ProcessedDay whose EW amplitude records 100.0 across the
+        # drop; ref_channel = EW makes that the gating channel, so a network range is
+        # admitted only where the reference is silent (NaN) — never here. Phases are
+        # an inert zero reference: these targets carry no phase, so only the
+        # amplitude-gating role is exercised.
+        g = timegrid(1.0); n = length(g)
+        refday = ProcessedDay(date, :REF, :NLK, 24.8e3, 1.0, g,
+                              fill(100.0, n), fill(NaN, n), fill(NaN, n),
+                              fill(0.0, n), fill(0.0, n), ProcessParams(cal_num=1.0))
         jobs2 = [job("DD"), job("EE"), job("FF")]
-        r2 = get_processed_network(jobs2, :NLK, date; baseline_amp=bamp, net_kw=net_kw)
+        r2 = get_processed_network(jobs2, :NLK, date; baseline=refday, ref_channel=EW, net_kw=net_kw)
         @test r2[1].EW_amp[205] == 1.0                               # not masked: dropout sample survives
 
         # Re-run honors the provenance-matched cache and returns the same product.
