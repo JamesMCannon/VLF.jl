@@ -53,8 +53,14 @@ reference (`build_processed`'s `baseline`/`ref_channel`) instead of raw NS/EW/am
 full `ProcessParams` ([`params_digest`](@ref)), so a product referenced against a
 different baseline — or against a reference cleaned with different settings — is a
 distinct cache identity. v7 entries are rebuilt rather than reinterpreted.
+
+Bumped 8 → 9: ProcessParams gained `ew_dt_s`, the NS→EW ADC conversion delay of a
+multiplexed DAQ (e.g. 5 µs for two channels scanned at 100 kS/s on a USB-6211).
+The phase pipeline now removes the resulting constant inter-channel phase
+(−360·Fc·ew_dt_s on EW) at build time, changing the stored product, so v8
+entries are rebuilt rather than reinterpreted.
 """
-const SCHEMA_VERSION = 8
+const SCHEMA_VERSION = 9
 
 """
     RxChannel
@@ -151,6 +157,19 @@ Phase:
   valid, the reference is *extrapolated* from its last valid value at this slope
   so the result stays continuous (`nothing` ⇒ `NaN` across the dropout).
 
+Inter-channel sampling skew:
+- `ew_dt_s::Union{Nothing,Float64} = nothing` — time (s) by which the EW channel's
+  ADC conversion occurs after the NS channel's within each scan of a multiplexed
+  DAQ (5.0e-6 for two channels at 100 kS/s on a USB-6211 under the NI-DAQmx
+  evenly-spaced convert clock). The skew imprints a constant +360·Fc·ew_dt_s (deg)
+  on the reported EW phase, which [`build_processed`](@ref) subtracts from the raw
+  EW phase before referencing/stitching. Amplitudes are unaffected (the shift is
+  invisible to a narrowband envelope). `nothing` applies no correction — correct
+  for simultaneously-sampled hardware. SIGN CONVENTION: ew_dt_s > 0 means EW
+  converts later; the physical sign is a convention here (an inverted sign is
+  absorbed to within |2·360·Fc·ew_dt_s − 90|° by re-resolving `offset_m`), so use
+  one sign consistently and re-resolve offsets if it ever changes.
+
 - `dropout_label::String = ""` — provenance for dropout ranges supplied to
   [`build_processed`](@ref) via `dropout_ranges` (e.g. from
   [`detect_dropouts_network`](@ref)). Caller-asserted: it labels the mask source
@@ -176,6 +195,7 @@ Base.@kwdef struct ProcessParams
     dropout_pad::Float64                = 1.0       # dilation each side of a flagged run (s)
     dropout_min_valid::Int              = 30        # minimum valid samples in a window to compute median
     dropout_label::String               = ""        # provenance for externally-applied dropout ranges (e.g. a network mask); "" ⇒ none
+    ew_dt_s::Union{Nothing,Float64}     = nothing   # s; NS→EW ADC conversion delay of a multiplexed DAQ. nothing ⇒ no skew correction
 end
 
 "True if two parameter sets would produce the same product."
@@ -187,7 +207,8 @@ provenance_matches(a::ProcessParams, b::ProcessParams) =
     a.max_gap == b.max_gap &&
     a.dropout_db == b.dropout_db && a.dropout_window == b.dropout_window &&
     a.dropout_pad == b.dropout_pad && a.dropout_min_valid == b.dropout_min_valid &&
-    a.dropout_label == b.dropout_label
+    a.dropout_label == b.dropout_label &&
+    a.ew_dt_s == b.ew_dt_s
 # ----------------------------------------------------------------------------
 # RawDay
 # ----------------------------------------------------------------------------

@@ -7,7 +7,11 @@ true north). Two independent per-receiver corrections act on the EW phasor befor
 the mix: `polarity` is the antenna wiring sign (`(NS, EW)`, each ±1; the Gross
 convention is `EW = -1`), and `offset_m ∈ {0,1,2,3}` is the demodulation
 quarter-turn `u_rel` (`+90·offset_m°` on EW — `0` for synchronous demodulation,
-resolved from the γ ladder for asynchronous). Reconstructs
+resolved from the γ ladder for asynchronous). 
+Both corrections assume the parent's phases are free of inter-channel sampling
+skew (`ProcessParams.ew_dt_s`, removed at build); an uncorrected multiplexed-DAQ
+parent leaves a continuous EW phase error that no quarter-turn can absorb,
+producing an irreducible B_r/B_azi leakage floor and biased rotated phases. Reconstructs
 `v_NS = polarity.NS · A_NS · e^{jψ_NS}` and
 `v_EW = polarity.EW · A_EW · e^{j(ψ_EW + 90·offset_m°)}` from the calibrated pT
 amplitudes and cleaned phases, then `[B_r; B_azi] = R(θ_az + π/2) · [v_NS; v_EW]`

@@ -26,7 +26,7 @@ export VLFCache, get_raw, load_raw, save_raw, load_index
 export raw_path, processed_path
 
 # --- processing ---
-export calibrate, calibration_factor, combine_quadrature
+export calibrate, calibration_factor, combine_quadrature, ew_skew_deg, shift_ew_phase
 export pT_to_uVm, to_db, apply_amplitude_units, PT_TO_UVM
 export amplitude, amplitudes
 export unwrap_phase, stitch_phase, clean_phase, detrend_phase

@@ -964,4 +964,82 @@ end
     @test_throws ErrorException baseline_subtract(A, Bgrid)
 end
 
+@testset "ew_skew_deg: magnitude and Fc scaling" begin
+    # 5 µs at the two AVID carriers — the values the RAB δ residuals matched.
+    @test ew_skew_deg(24.8e3, 5.0e-6) ≈ 44.64
+    @test ew_skew_deg(25.2e3, 5.0e-6) ≈ 45.36
+    # Linear in both arguments; sign follows the convention (EW later ⇒ positive).
+    @test ew_skew_deg(24.8e3, -5.0e-6) ≈ -44.64
+    @test ew_skew_deg(2 * 24.8e3, 5.0e-6) ≈ 2 * 44.64
+end
+
+@testset "provenance: ew_dt_s is part of product identity" begin
+    a = ProcessParams(cal_num = 1.0)
+    b = ProcessParams(cal_num = 1.0, ew_dt_s = 5.0e-6)
+    c = ProcessParams(cal_num = 1.0, ew_dt_s = 5.0e-6)
+    @test !VLF.provenance_matches(a, b)     # corrected ≠ uncorrected
+    @test VLF.provenance_matches(b, c)
+end
+
+@testset "shift_ew_phase: EW phase only, everything else untouched" begin
+    day = mk_processed(NS_amp = [4.0], EW_amp = [3.0], NS_pha = [10.0], EW_pha = [20.0])
+    s = shift_ew_phase(day, -44.64)
+    @test s.EW_pha[1] ≈ 20.0 - 44.64
+    @test s.NS_pha[1] == day.NS_pha[1]
+    @test s.EW_amp == day.EW_amp && s.NS_amp == day.NS_amp
+    @test s.combined_amp == day.combined_amp
+end
+
+@testset "skew correction restores the linear-polarization B_r null" begin
+    # The TM-dominant fixture from the rotate_day tests (deep B_r null at
+    # bearing 30°), with a 5 µs skew imprinted on EW as +ew_skew_deg(Fc, dt).
+    # Uncorrected, the skew fakes ellipticity and floors the leakage; removing
+    # exactly ew_skew_deg(Fc, dt) recovers the null. Fc = 24.8e3 (mk_processed).
+    dt = 5.0e-6
+    ε  = ew_skew_deg(24.8e3, dt)
+    skewed = mk_processed(NS_amp = [1.0], EW_amp = [1 / sqrt(3)],
+                          NS_pha = [0.0], EW_pha = [180.0 + ε])
+    R_bad  = rotate_day(skewed, 30.0)
+    @test R_bad.Br_amp[1] > 0.1                       # irreducible leakage, ~sin(ε/2)-scale
+    R_good = rotate_day(shift_ew_phase(skewed, -ε), 30.0)
+    @test isapprox(R_good.Br_amp[1], 0.0; atol = 1e-9)
+    @test R_good.Bazi_amp[1] ≈ 2 / sqrt(3)
+end
+
+@testset "build_processed applies ew_dt_s to EW phase only" begin
+    mktempdir() do dir
+        # Constant-phase channel-day fixtures; amplitudes present so the build
+        # has a template and calibration path. Fc = 24.8e3 (fixture default).
+        # Fixtures cover 10 samples of the canonical 86400-sample day; the NaN
+        # tail forces NaN-aware comparisons (isequal / masked ≈), since
+        # NaN == NaN is false under == and isapprox.
+        n = 10
+        make_avid(dir; ch = "EW", q = "A", data = fill(100.0, n))
+        make_avid(dir; ch = "NS", q = "A", data = fill(100.0, n))
+        make_avid(dir; ch = "EW", q = "B", data = fill(20.0, n))
+        make_avid(dir; ch = "NS", q = "B", data = fill(10.0, n))
+
+        dt  = 5.0e-6
+        ε   = ew_skew_deg(24.8e3, dt)
+        prm  = ProcessParams(cal_num = 1.0)
+        prmc = ProcessParams(cal_num = 1.0, ew_dt_s = dt)
+
+        cache = VLFCache(joinpath(dir, "cache"))
+        d0 = get_processed(cache, dir, :FSI, :NLK, Date(2025, 6, 1), prm)
+        dc = get_processed(cache, dir, :FSI, :NLK, Date(2025, 6, 1), prmc; recompute = true)
+
+        # EW phase: shifted by −360·Fc·dt on valid samples; NaN pattern preserved.
+        v = .!isnan.(d0.EW_pha)
+        @test count(v) == n
+        @test dc.EW_pha[v] ≈ d0.EW_pha[v] .- ε
+        @test isnan.(dc.EW_pha) == isnan.(d0.EW_pha)
+
+        # Everything else untouched (isequal: NaN-aware elementwise identity).
+        @test isequal(dc.NS_pha, d0.NS_pha)
+        @test isequal(dc.EW_amp, d0.EW_amp)
+        @test isequal(dc.NS_amp, d0.NS_amp)
+        @test isequal(dc.combined_amp, d0.combined_amp)
+    end
+end
+
 end # @testset "VLF.jl"

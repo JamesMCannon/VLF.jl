@@ -152,6 +152,16 @@ end
 unit_label(u::AmplitudeUnits) = string(u.efield ? "µV/m" : "pT", u.db ? " (dB)" : "")
 
 """
+    ew_skew_deg(Fc, ew_dt_s) -> Float64
+
+Constant phase (deg) imprinted on the EW channel by a multiplexed DAQ that
+converts EW `ew_dt_s` seconds after NS within each scan: a sample converted late
+but timestamped nominally reports a carrier phase high by `360·Fc·ew_dt_s`.
+The correction is therefore a SUBTRACTION of this value from the EW phase.
+"""
+ew_skew_deg(Fc::Real, ew_dt_s::Real) = 360.0 * Fc * ew_dt_s
+
+"""
     ProcessedView
 
 A read-only units projection of a [`ProcessedDay`](@ref). The three amplitude
@@ -247,6 +257,20 @@ propagates to NaN (a sample is only "combined" where both channels exist).
 """
 combine_quadrature(ns::AbstractVector, ew::AbstractVector) = sqrt.(ns .^ 2 .+ ew .^ 2)
 
+"""
+    shift_ew_phase(day::ProcessedDay, dφ_deg::Real) -> ProcessedDay
+
+Copy of `day` with `dφ_deg` added to the EW phase (amplitudes and NS untouched).
+A DIAGNOSTIC tool for scanning a continuous EW phase offset (e.g. testing a skew
+sign convention or a residual inter-channel phase) before committing it to
+`ProcessParams.ew_dt_s`: the shift is NOT recorded in `params`, so the result
+must not be cached — production corrections belong in `ew_dt_s`.
+"""
+shift_ew_phase(day::ProcessedDay, dφ_deg::Real) =
+    ProcessedDay(day.date, day.rx, day.tx, day.Fc, day.Fs, day.time,
+                 day.EW_amp, day.NS_amp, day.combined_amp,
+                 day.EW_pha .+ float(dφ_deg), day.NS_pha, day.params)
+
 # --- build / get ProcessedDay ----------------------------------------------
 """
     build_processed(cache, source_folder, rx, tx, date, params;
@@ -307,6 +331,18 @@ function build_processed(c::VLFCache, source_folder::AbstractString, rx, tx, dat
     ns_amp_pT = ns_amp === nothing ? fill(NaN, n) : calibrate(ns_amp, params)
     ew_p = ew_pha === nothing ? fill(NaN, n) : copy(ew_pha.data)
     ns_p = ns_pha === nothing ? fill(NaN, n) : copy(ns_pha.data)
+
+     # --- inter-channel sampling-skew correction ------------------------------
+    # A multiplexed DAQ converts EW ew_dt_s after NS within each scan, imprinting
+    # a constant +360·Fc·ew_dt_s (deg) on the reported EW phase. Removed here,
+    # BEFORE referencing/masking/stitch, so every downstream consumer (reference
+    # subtraction, rotation, δ diagnostics) sees skew-free phase. A constant
+    # offset is invariant under unwrap, detrend, and the n×90° stitch (all act on
+    # differences), so placement ahead of the pipeline changes nothing else.
+    # NaN gaps pass through unchanged.
+    if params.ew_dt_s !== nothing && ew_pha !== nothing
+        ew_p .-= ew_skew_deg(Fc, params.ew_dt_s)
+    end
 
     # --- resolve the reference against the target grid ----------------------
     # The single ProcessedDay carries every baseline role: its NS/EW phase is the
