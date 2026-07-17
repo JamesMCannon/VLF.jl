@@ -120,13 +120,27 @@ function build_rawday(folder::AbstractString, key::DataKey)
     files = source_files_for(folder, key)
     isempty(files) && return nothing
 
-    partials = [read_mat_partial(joinpath(folder, f)) for f in files]
+    # Per-file guard: a truncated or corrupt .mat costs only its own segment
+    # (warn + skip), not the whole channel-day. Fs/Fc template comes from the
+    # first READABLE file.
+    partials = _Partial[]
+    kept     = String[]
+    for f in files
+        try
+            push!(partials, read_mat_partial(joinpath(folder, f)))
+            push!(kept, f)
+        catch e
+            @warn "Skipping unreadable source file" file = joinpath(folder, f) exception = e
+        end
+    end
+    isempty(partials) && return nothing
+
     Fs = partials[1].Fs
     Fc = partials[1].Fc
     n  = round(Int, 86400 * Fs)
     data = fill(NaN, n)
 
-    for (f, p) in zip(files, partials)
+    for (f, p) in zip(kept, partials)
         if !isapprox(p.Fs, Fs; rtol = 1e-9)
             @warn "Skipping file with mismatched Fs" file=f expected=Fs got=p.Fs
             continue

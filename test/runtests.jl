@@ -139,6 +139,23 @@ end
     end
 end
 
+@testset "build_rawday survives a corrupt source file" begin
+    mktempdir() do dir
+        n = 10
+        make_avid(dir; ch = "NS", q = "A", data = fill(1.0, n))                 # 00:00
+        make_avid(dir; ch = "NS", q = "A", data = fill(2.0, n), start_h = 1)    # 01:00
+        # truncate the second file mid-header
+        f2 = filter(f -> occursin("010000", f), readdir(dir))[1]
+        open(joinpath(dir, f2), "r+") do io; truncate(io, 12); end
+        rd = @test_logs (:warn, r"Skipping unreadable") match_mode=:any begin
+            VLF.build_rawday(dir, DataKey(Date(2025, 6, 1), :FSI, :NLK, NS, AMPLITUDE))
+        end
+        @test rd !== nothing
+        @test all(rd.data[1:n] .== 1.0)          # good file intact
+        @test all(isnan, rd.data[3601:3610])     # corrupt hour absent, day survives
+    end
+end
+
 # ---------------------------------------------------------------------------
 @testset "cache: round-trip (incl. TimeGrid + NaN)" begin
     mktempdir() do dir
