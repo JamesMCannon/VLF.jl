@@ -23,6 +23,31 @@ function write_mat_file(path; start_hour = 0, start_minute = 0, start_second = 0
     return path
 end
 
+"""
+Write a minimal MAT Level 4 file with the fields read_mat_partial needs,
+plus `pad` trailing zero bytes (mimicking receiver-written files).
+"""
+function write_v4_file(path; start_hour = 0, start_minute = 0, start_second = 0,
+                       Fs = 1.0, Fc = 24.8e3, data = zeros(Float32, 10), pad = 0)
+    open(path, "w") do io
+        # Level 4 element: MOPT type, mrows, ncols, imagf, namlen, name\0, values
+        writevar(name, vals, P) = begin
+            write(io, Int32(10P), Int32(length(vals)), Int32(1), Int32(0),
+                  Int32(length(name) + 1))
+            write(io, codeunits(name), 0x00)
+            write(io, vals)
+        end
+        writevar("start_hour",   [Float64(start_hour)],   0)
+        writevar("start_minute", [Float64(start_minute)], 0)
+        writevar("start_second", [Float64(start_second)], 0)
+        writevar("Fs",           [Float64(Fs)],           0)
+        writevar("Fc",           [Float64(Fc)],           0)
+        writevar("data",         Float32.(collect(data)), 1)   # P=1 -> Float32
+        write(io, zeros(UInt8, pad))
+    end
+    return path
+end
+
 "Create an AVID-format file (e.g. FSI250601000000_NLK_EW_A.mat) in `dir`. Returns its name."
 function make_avid(dir; rx = "FSI", date = "250601", time = "000000",
                    tx = "NLK", ch = "EW", q = "A", kwargs...)

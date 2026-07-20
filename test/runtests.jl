@@ -142,17 +142,35 @@ end
 @testset "build_rawday survives a corrupt source file" begin
     mktempdir() do dir
         n = 10
-        make_avid(dir; ch = "NS", q = "A", data = fill(1.0, n))                 # 00:00
-        make_avid(dir; ch = "NS", q = "A", data = fill(2.0, n), start_hour = 1)    # 01:00
-        # truncate the second file mid-header
-        f2 = filter(f -> occursin("010000", f), readdir(dir))[1]
-        open(joinpath(dir, f2), "r+") do io; truncate(io, 12); end
+        # Distinct `time` fields give distinct filenames; both share one DataKey
+        # (the filename start time is not part of the key), so they grid together.
+        good = make_avid(dir; ch = "NS", q = "A", time = "000000",
+                         start_hour = 0, data = fill(1.0, n))
+        bad  = make_avid(dir; ch = "NS", q = "A", time = "010000",
+                         start_hour = 1, data = fill(2.0, n))
+
+        # Truncate the 01:00 file mid-header. Match the returned name exactly:
+        # a substring test on "010000" also matches the 00:00 file, whose date
+        # field "250601000000" happens to contain that sequence.
+        open(joinpath(dir, bad), "r+") do io; truncate(io, 12); end
+
         rd = @test_logs (:warn, r"Skipping unreadable") match_mode=:any begin
             VLF.build_rawday(dir, DataKey(Date(2025, 6, 1), :FSI, :NLK, NS, AMPLITUDE))
         end
         @test rd !== nothing
         @test all(rd.data[1:n] .== 1.0)          # good file intact
         @test all(isnan, rd.data[3601:3610])     # corrupt hour absent, day survives
+    end
+end
+
+@testset "mat: v4 file with trailing zero padding (receiver format)" begin
+    mktempdir() do dir
+        p = write_v4_file(joinpath(dir, "ISL240727000000_NPM_NS_A.mat");
+                          Fs = 1.0, Fc = 21.4e3, data = Float32.(1:5), pad = 52)
+        part = VLF.read_mat_partial(p)
+        @test part.start_seconds == 0.0
+        @test part.Fs == 1.0 && part.Fc == 21.4e3
+        @test part.data == 1.0:5.0
     end
 end
 

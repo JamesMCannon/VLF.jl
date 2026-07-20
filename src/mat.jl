@@ -102,9 +102,11 @@ end
 const _V4_ELTYPE = (Float64, Float32, Int32, Int16, UInt16, UInt8)
 
 # Parse the five Int32s of a Level 4 element header at the current position.
-# Returns nothing when they do not describe a valid element (e.g. padding).
+# Fields are widened to Int: they index and size Julia arrays, and reshape
+# accepts only Int dimensions. Returns nothing when the five values do not
+# describe a valid element (e.g. trailing padding).
 function _v4_element_header(io::IO, swap::Bool)
-    rd() = (x = read(io, Int32); swap ? bswap(x) : x)
+    rd() = (x = read(io, Int32); Int(swap ? bswap(x) : x))
     dtype = rd(); mrows = rd(); ncols = rd(); imagf = rd(); namlen = rd()
     0 <= dtype <= 9999 || return nothing
     M = div(dtype, 1000) % 10          # numeric format (0 = IEEE little-endian)
