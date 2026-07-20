@@ -59,8 +59,14 @@ multiplexed DAQ (e.g. 5 µs for two channels scanned at 100 kS/s on a USB-6211).
 The phase pipeline now removes the resulting constant inter-channel phase
 (−360·Fc·ew_dt_s on EW) at build time, changing the stored product, so v8
 entries are rebuilt rather than reinterpreted.
+
+Bumped 9 → 10: ProcessParams gained `swap_channels`, marking a receiver whose
+antennas are physically cross-connected (the NS-labeled file carries the
+EW-oriented antenna and vice versa). build_processed exchanges the calibrated
+series into physical slots, changing the stored product, so v9 entries are
+rebuilt rather than reinterpreted.
 """
-const SCHEMA_VERSION = 9
+const SCHEMA_VERSION = 10
 
 """
     RxChannel
@@ -170,6 +176,20 @@ Inter-channel sampling skew:
   absorbed to within |2·360·Fc·ew_dt_s − 90|° by re-resolving `offset_m`), so use
   one sign consistently and re-resolve offsets if it ever changes.
 
+  Channel identity:
+- `swap_channels::Bool = false` — the receiver's antennas are physically
+  cross-connected: the NS file label is fed by the EW-oriented antenna and vice
+  versa. Calibration is applied under the FILE label (an end-to-end calibration
+  characterizes the recording chain — antenna, preamp, ADC channel — as
+  plumbed), and the calibrated series are then exchanged so `ProcessedDay`'s
+  `NS_*`/`EW_*` slots carry the physical orientation. A per-channel `cal_num`
+  NamedTuple is therefore keyed by FILE label. `ew_dt_s` remains a property of
+  the file-EW recording channel (second in the multiplexed scan), so under a
+  swap that correction lands on the physical-NS slot. Raw-tier objects keep
+  file labels. `rotate_day`'s `polarity`/`offset_m` are slot conventions
+  DOWNSTREAM of the swap — re-resolve them for a receiver after enabling this
+  flag rather than assuming the old values carry over.
+
 - `dropout_label::String = ""` — provenance for dropout ranges supplied to
   [`build_processed`](@ref) via `dropout_ranges` (e.g. from
   [`detect_dropouts_network`](@ref)). Caller-asserted: it labels the mask source
@@ -196,6 +216,7 @@ Base.@kwdef struct ProcessParams
     dropout_min_valid::Int              = 30        # minimum valid samples in a window to compute median
     dropout_label::String               = ""        # provenance for externally-applied dropout ranges (e.g. a network mask); "" ⇒ none
     ew_dt_s::Union{Nothing,Float64}     = nothing   # s; NS→EW ADC conversion delay of a multiplexed DAQ. nothing ⇒ no skew correction
+    swap_channels::Bool                 = false     # antennas physically cross-connected; slots exchanged to physical orientation at build
 end
 
 "True if two parameter sets would produce the same product."
@@ -208,7 +229,8 @@ provenance_matches(a::ProcessParams, b::ProcessParams) =
     a.dropout_db == b.dropout_db && a.dropout_window == b.dropout_window &&
     a.dropout_pad == b.dropout_pad && a.dropout_min_valid == b.dropout_min_valid &&
     a.dropout_label == b.dropout_label &&
-    a.ew_dt_s == b.ew_dt_s
+    a.ew_dt_s == b.ew_dt_s &&
+    a.swap_channels == b.swap_channels
 # ----------------------------------------------------------------------------
 # RawDay
 # ----------------------------------------------------------------------------

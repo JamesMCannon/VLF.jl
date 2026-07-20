@@ -320,9 +320,12 @@ function build_processed(c::VLFCache, source_folder::AbstractString, rx, tx, dat
     n = length(tg)
 
     if ew_amp === nothing || ns_amp === nothing
+        # Reported labels are the PRODUCT slots left NaN. Under swap_channels the
+        # missing file channel and the affected physical slot are opposite labels.
+        phys(file_ch) = !params.swap_channels ? file_ch : (file_ch == "EW" ? "NS" : "EW")
         missing_amps = String[]
-        ew_amp === nothing && push!(missing_amps, "EW")
-        ns_amp === nothing && push!(missing_amps, "NS")
+        ew_amp === nothing && push!(missing_amps, phys("EW"))
+        ns_amp === nothing && push!(missing_amps, phys("NS"))
         @warn "Missing amplitude channel(s); amplitude/combined left as NaN \
                (phase still processed where present)." rx=rxs tx=txs date missing=missing_amps
     end
@@ -339,9 +342,25 @@ function build_processed(c::VLFCache, source_folder::AbstractString, rx, tx, dat
     # subtraction, rotation, δ diagnostics) sees skew-free phase. A constant
     # offset is invariant under unwrap, detrend, and the n×90° stitch (all act on
     # differences), so placement ahead of the pipeline changes nothing else.
-    # NaN gaps pass through unchanged.
+    # NaN gaps pass through unchanged. Applied under the FILE label, before the
+    # swap below moves the series into physical slots.
     if params.ew_dt_s !== nothing && ew_pha !== nothing
         ew_p .-= ew_skew_deg(Fc, params.ew_dt_s)
+    end
+
+    # --- physical-orientation relabeling (swapped antennas) ------------------
+    # Both corrections above are keyed to the FILE label, for the same reason:
+    # each characterizes a recording chain as plumbed, not an antenna
+    # orientation. An end-to-end calibration follows the chain (antenna, preamp,
+    # ADC channel), and the multiplexed-DAQ skew belongs to whichever chain
+    # converts second in the scan — the file-EW one — independent of which
+    # antenna feeds it. Only after both are applied are the series exchanged
+    # into the slots matching their physical orientation, so every downstream
+    # consumer (quadrature, referencing, masking, rotation) sees physically-
+    # labeled NS/EW.
+    if params.swap_channels
+        ew_amp_pT, ns_amp_pT = ns_amp_pT, ew_amp_pT
+        ew_p,      ns_p      = ns_p,      ew_p
     end
 
     # --- resolve the reference against the target grid ----------------------

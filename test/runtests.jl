@@ -143,7 +143,7 @@ end
     mktempdir() do dir
         n = 10
         make_avid(dir; ch = "NS", q = "A", data = fill(1.0, n))                 # 00:00
-        make_avid(dir; ch = "NS", q = "A", data = fill(2.0, n), start_h = 1)    # 01:00
+        make_avid(dir; ch = "NS", q = "A", data = fill(2.0, n), start_hour = 1)    # 01:00
         # truncate the second file mid-header
         f2 = filter(f -> occursin("010000", f), readdir(dir))[1]
         open(joinpath(dir, f2), "r+") do io; truncate(io, 12); end
@@ -1056,6 +1056,35 @@ end
         @test isequal(dc.EW_amp, d0.EW_amp)
         @test isequal(dc.NS_amp, d0.NS_amp)
         @test isequal(dc.combined_amp, d0.combined_amp)
+    end
+end
+
+@testset "process: swap_channels" begin
+    mktempdir() do dir
+        make_avid(dir; ch = "EW", q = "A", data = fill(3.0, 10))
+        make_avid(dir; ch = "NS", q = "A", data = fill(4.0, 10))
+        make_avid(dir; ch = "EW", q = "B", data = fill(30.0, 10))
+        make_avid(dir; ch = "NS", q = "B", data = fill(10.0, 10))
+        cache = VLFCache(joinpath(dir, "cache"))
+
+        # Per-channel cal is keyed by FILE label; product slots are physical.
+        prm = ProcessParams(cal_num = (EW = 2.0, NS = 3.0), swap_channels = true)
+        d = get_processed(cache, dir, :FSI, :NLK, Date(2025,6,1), prm)
+        @test d.NS_amp[5] == 2.0 * 3.0     # file-EW counts × file-EW cal → physical NS
+        @test d.EW_amp[5] == 3.0 * 4.0     # file-NS counts × file-NS cal → physical EW
+        @test d.combined_amp[5] == sqrt(6.0^2 + 12.0^2)
+
+        # ew_dt_s lands on the slot holding file-EW data.
+        dt = 5.0e-6
+        prmc = ProcessParams(cal_num = 1.0, swap_channels = true, ew_dt_s = dt)
+        dc = get_processed(cache, dir, :FSI, :NLK, Date(2025,6,1), prmc; recompute = true)
+        v = .!isnan.(dc.NS_pha)
+        @test dc.NS_pha[v] ≈ fill(30.0 - ew_skew_deg(24.8e3, dt), count(v))
+        @test dc.EW_pha[v] ≈ fill(10.0, count(v))
+
+        # Distinct provenance.
+        @test !VLF.provenance_matches(ProcessParams(cal_num = 1.0),
+                                      ProcessParams(cal_num = 1.0, swap_channels = true))
     end
 end
 
