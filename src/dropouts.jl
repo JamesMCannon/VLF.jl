@@ -17,7 +17,7 @@
 # median(dB) == dB(median): the dB/linear choice is irrelevant to the reference.
 function _nanmedian(vals::AbstractVector{<:Real})
     isempty(vals) && return NaN
-    s = sort(vals); n = length(s)
+    s = sort!(vals); n = length(s)
     return isodd(n) ? s[(n+1)÷2] : 0.5 * (s[n÷2] + s[n÷2 + 1])
 end
 
