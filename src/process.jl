@@ -602,23 +602,31 @@ default), and `offset_m` (the demodulation quarter-turn `u_rel`; `0` for
 synchronous demodulation, resolved from the γ ladder for asynchronous) — the same
 way `NetworkJob` bundles a receiver's cache/source/params against the
 misalignment risk of parallel vectors.
+`rho_deg` and `xi_deg` describe the rotation and off-orthogonality of the 
+receiver's physical antenna frame relative to the idealized NS/EW axes. 
 
 A synchronously-demodulated, Gross-wired receiver needs only `bearing_deg`
 (`polarity` and `offset_m` at their defaults). An asynchronously-demodulated or
 unknown-wiring receiver requires an `offset_m` resolved beforehand (e.g. via a
 single- or multi-transmitter γ-minimization), since no default is a correct
 assumption for a receiver whose relative channel offset hasn't been measured.
+An ideal NS/EW antenna frame has `rho_deg = 0` and `xi_deg = 0`.
 """
 struct RotatedJob
     job::NetworkJob
     bearing_deg::Float64
     polarity::NamedTuple
     offset_m::Int
+    rho_deg::Float64
+    xi_deg::Float64
 end
 RotatedJob(job::NetworkJob, bearing_deg::Real;
-          polarity::NamedTuple = (NS = 1, EW = -1),
-          offset_m::Integer = 0) =
-    RotatedJob(job, float(bearing_deg), polarity, Int(offset_m))    
+           polarity::NamedTuple = (NS = 1, EW = -1),
+           offset_m::Integer = 0,
+           rho_deg::Real = 0.0,
+           xi_deg::Real = 0.0) =
+    RotatedJob(job, float(bearing_deg), polarity, Int(offset_m),
+               float(rho_deg), float(xi_deg)) 
 """
     get_processed_network(jobs, tx, date;
                           baseline=nothing, ref_channel=nothing,
@@ -787,7 +795,8 @@ function get_rotated_network(jobs::AbstractVector{RotatedJob}, reference::Rotate
     R_ref = nothing
     if ref_day !== nothing
         R = rotate_day(ref_day, reference.bearing_deg;
-                   polarity = reference.polarity, offset_m = reference.offset_m)
+                   polarity = reference.polarity, offset_m = reference.offset_m,
+                   rho_deg = reference.rho_deg, xi_deg = reference.xi_deg)
         if count(!isnan, R.Bazi_amp) == 0
             @warn "rotated reference has no valid samples (a rotated sample needs both \
                    channels' amplitude AND phase); near-field masking retained, differencing \
@@ -865,7 +874,8 @@ function get_rotated_network(jobs::AbstractVector{RotatedJob}, reference::Rotate
                           dropout_ranges = unified_ranges, recompute = recompute)
         d === nothing && continue
 
-        R = rotate_day(d, j.bearing_deg; polarity = j.polarity, offset_m = j.offset_m)
+        R = rotate_day(d, j.bearing_deg; polarity = j.polarity, offset_m = j.offset_m,
+                       rho_deg = j.rho_deg, xi_deg = j.xi_deg)
 
         if R_ref !== nothing
             results[i] = baseline_subtract(R, R_ref)

@@ -333,7 +333,17 @@ synchronous demodulation, resolved from the TM-leakage γ ladder for asynchronou
 `polarity` and `offset_m` are independent corrections: `polarity` carries a known
 antenna sign (real, ±1 on each channel individually), `offset_m` carries the
 demodulation-driven relative factor (any quarter-turn, including ±90°, which no
-real wiring sign can produce). `baseline_label` is `""` for an absolute
+real wiring sign can produce). 
+`rho_deg`/`xi_deg` are the Woods & Inan (2004) antenna-frame geometry inverted
+before the bearing rotation: `rho_deg` is the azimuth of the NS antenna's
+sensitive axis (degrees clockwise from true north, the `bearing_deg` convention;
+a geomagnetically-aligned frame has ρ = the local declination), and `xi_deg` is
+the EW axis's departure from orthogonality (EW axis azimuth = 90° + ρ + ξ, per
+S_EW ∝ sin(θ − ρ − ξ)). Defaults of 0 recover the ideal geographic-orthogonal
+frame. Like `polarity`/`offset_m`, both act only at rotation and never alter the
+parent `ProcessedDay` — whose `combined_amp` therefore retains an O(ξ)
+azimuth-dependent bias (quadrature is invariant under ρ but not ξ).
+`baseline_label` is `""` for an absolute
 (un-referenced) product and names the reference receiver after
 [`baseline_subtract`](@ref). `params` is carried through from the parent for
 provenance; neither `polarity` nor `offset_m` is stored there, since both act only
@@ -353,6 +363,8 @@ struct RotatedDay
     Bazi_pha::Vector{Float64}   # deg, (-180, 180]
     polarity::NamedTuple        # per-receiver wiring sign (NS, EW), each ±1
     offset_m::Int               # per-receiver demod quarter-turn u_rel ∈ {0,1,2,3}
+    rho_deg::Float64            # NS-axis azimuth, deg CW from true north (frame rotation ρ)
+    xi_deg::Float64             # EW-axis departure from orthogonality ξ; EW axis at 90°+ρ+ξ
     params::ProcessParams
     baseline_label::String
 end

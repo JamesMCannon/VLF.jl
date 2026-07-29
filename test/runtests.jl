@@ -871,6 +871,51 @@ end
     @test angeq(R360.Bazi_pha[1], R.Bazi_pha[1])
 end
 
+@testset "rotate: rho/xi frame corrections" begin
+    A_NS, A_EW, ψ_NS, ψ_EW = 4.0, 3.0, 25.0, -40.0
+    day = mk_processed(NS_amp = [A_NS], EW_amp = [A_EW], NS_pha = [ψ_NS], EW_pha = [ψ_EW])
+
+    # ξ = 0: a bulk frame rotation ρ is exactly a bearing reduced by ρ, in both
+    # components (amp and phase), since M(ρ,0) = R(ρ)ᵀ folds into R(θ_az+90°).
+    Rρ = rotate_day(day, 37.0; rho_deg = 5.0)
+    Rb = rotate_day(day, 32.0)
+    @test Rρ.Br_amp[1]   ≈ Rb.Br_amp[1]   atol = 1e-12
+    @test Rρ.Bazi_amp[1] ≈ Rb.Bazi_amp[1] atol = 1e-12
+    @test VLF._wrap180(Rρ.Br_pha[1]   - Rb.Br_pha[1])   ≈ 0.0 atol = 1e-9
+    @test VLF._wrap180(Rρ.Bazi_pha[1] - Rb.Bazi_pha[1]) ≈ 0.0 atol = 1e-9
+
+    # Round trip: a known geographic field B = [B_N; B_E] (complex phasors) is
+    # pushed through the Woods & Inan measurement map to synthesize skewed
+    # channels m = M(ρ,ξ)·B, with
+    #   m_NS =  cos ρ     · B_N + sin ρ     · B_E
+    #   m_EW = −sin(ρ+ξ)  · B_N + cos(ρ+ξ)  · B_E   (det M = cos ξ).
+    # rotate_day with matching rho_deg/xi_deg must invert M and return
+    # R(θ_az+90°)·B — identical to the plain rotation of the ideal orthogonal,
+    # geographic-aligned channels. polarity=(NS=1,EW=1), offset_m=0 gives
+    # v_NS=m_NS, v_EW=m_EW (no wiring sign / quarter-turn), isolating M⁻¹.
+    ρ, ξ, θ = 12.0, 4.0, 37.0
+    B_N = 2.0 * cis(deg2rad( 15.0))
+    B_E = 1.5 * cis(deg2rad(-30.0))
+    m_NS =  cosd(ρ)     * B_N + sind(ρ)     * B_E
+    m_EW = -sind(ρ + ξ) * B_N + cosd(ρ + ξ) * B_E
+
+    skewed = mk_processed(NS_amp = [abs(m_NS)], EW_amp = [abs(m_EW)],
+                          NS_pha = [rad2deg(angle(m_NS))], EW_pha = [rad2deg(angle(m_EW))])
+    ideal  = mk_processed(NS_amp = [abs(B_N)],  EW_amp = [abs(B_E)],
+                          NS_pha = [rad2deg(angle(B_N))],  EW_pha = [rad2deg(angle(B_E))])
+
+    Rskew  = rotate_day(skewed, θ; rho_deg = ρ, xi_deg = ξ, polarity = (NS = 1, EW = 1))
+    Rideal = rotate_day(ideal,  θ;                          polarity = (NS = 1, EW = 1))
+
+    @test Rskew.Br_amp[1]   ≈ Rideal.Br_amp[1]   atol = 1e-10
+    @test Rskew.Bazi_amp[1] ≈ Rideal.Bazi_amp[1] atol = 1e-10
+    @test VLF._wrap180(Rskew.Br_pha[1]   - Rideal.Br_pha[1])   ≈ 0.0 atol = 1e-8
+    @test VLF._wrap180(Rskew.Bazi_pha[1] - Rideal.Bazi_pha[1]) ≈ 0.0 atol = 1e-8
+
+    # Degenerate antenna pair: parallel axes at |ξ| = 90° (det M = cos ξ = 0).
+    @test_throws ErrorException rotate_day(day, 37.0; xi_deg = 90.0)
+end
+
 @testset "rotate_day: common-mode phase leaves |B_r|, |B_azi|, ψ₀ invariant" begin
     φ    = 33.0
     base = (NS_amp = [4.0], EW_amp = [3.0], NS_pha = [25.0], EW_pha = [-40.0])
