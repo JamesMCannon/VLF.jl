@@ -8,7 +8,7 @@ the mix: `polarity` is the antenna wiring sign (`(NS, EW)`, each ±1; the Gross
 convention is `EW = -1`), and `offset_m ∈ {0,1,2,3}` is the demodulation
 quarter-turn `u_rel` (`+90·offset_m°` on EW — `0` for synchronous demodulation,
 resolved from the γ ladder for asynchronous). 
-`rho_deg`/`xi_deg` invert the Woods & Inan (2004) antenna-frame geometry before
+`rho_deg`/`xi_deg` invert the Wood & Inan (2004) antenna-frame geometry before
 the bearing rotation: the measured phasors satisfy `m_NS ∝ cos(θ−ρ)`,
 `m_EW ∝ sin(θ−ρ−ξ)` (all azimuths degrees clockwise from true north), i.e.
 `m = M·[B_N; B_E]` with `det M = cos ξ`, and the applied map is
@@ -45,7 +45,7 @@ function rotate_day(day::ProcessedDay, bearing_deg::Real;
                rotated phases inherit it and are not absolute." day.rx day.tx day.date
     end
 
-    # Antenna-frame geometry (Woods & Inan 2004): NS axis at azimuth ρ, EW axis
+    # Antenna-frame geometry (Wood & Inan 2004): NS axis at azimuth ρ, EW axis
     # at 90°+ρ+ξ (azimuths CW from true north). The measured phasors are
     # m = M·[B_N; B_E] with det M = cos ξ; the composed map applied per sample is
     # T = R(θ_az + 90°)·M⁻¹, in closed form via a = α−ρ, b = α−ρ−ξ. ξ = ±90°
@@ -58,8 +58,8 @@ function rotate_day(day::ProcessedDay, bearing_deg::Real;
         error("rotate_day: |xi_deg| ≥ 90° is a degenerate antenna pair (det = cos ξ ≤ 0).")
     cξ = cos(ξ)
     a, b = α - ρ, α - ρ - ξ
-    t11, t12 =  cos(b) / cξ, sin(a) / cξ
-    t21, t22 = -sin(b) / cξ, cos(a) / cξ
+    t11, t12 =  cos(b) / cξ, -sin(a) / cξ
+    t21, t22 = sin(b) / cξ, cos(a) / cξ
 
     pNS, pEW = polarity.NS, polarity.EW
     dϕEW     = 90.0 * offset_m
